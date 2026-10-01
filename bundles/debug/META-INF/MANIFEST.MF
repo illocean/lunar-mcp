@@ -4,6 +4,8 @@ Bundle-Name: LUNAR Debug
 Bundle-SymbolicName: com.github.lunar.debug;singleton:=true
 Bundle-Version: 0.0.1
 Bundle-Vendor: LUNAR
+Bundle-License: MIT
+Bundle-Copyright: Copyright (c) 2026 lunar contributors
 Bundle-RequiredExecutionEnvironment: JavaSE-21
 Bundle-ActivationPolicy: lazy
 Require-Bundle: com.github.lunar.core;bundle-version="[0.0.1,0.1.0)",org

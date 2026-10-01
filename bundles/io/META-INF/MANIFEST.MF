@@ -4,6 +4,8 @@ Bundle-Name: LUNAR HTTP
 Bundle-SymbolicName: com.github.lunar.io;singleton:=true
 Bundle-Version: 0.0.1
 Bundle-Vendor: LUNAR
+Bundle-License: MIT
+Bundle-Copyright: Copyright (c) 2026 lunar contributors
 Bundle-RequiredExecutionEnvironment: JavaSE-21
 Bundle-ActivationPolicy: lazy
 Service-Component: OSGI-INF/com.github.lunar.core.LunarServer.xml

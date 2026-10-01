@@ -39,6 +39,8 @@ Codex, OpenCode, Claude Code, and any other MCP client, as long as it speaks str
    [Environment]::SetEnvironmentVariable('ECLIPSE_MCP_TOKEN', '<a long random string>', 'User')
    ```
 
+   Open a new terminal afterwards. A terminal that was already running keeps the old environment, and a client started from it sends an unexpanded `${ECLIPSE_MCP_TOKEN}` that lunar rejects with 401.
+
 2. Build. From the repository root, with JDK 21 on `PATH`:
 
    ```powershell
@@ -89,6 +91,8 @@ The jar file names in `build.ps1` are pinned to one Eclipse release train too. I
 
 The endpoint is `http://127.0.0.1:8124/mcp`, the advertised MCP protocol version is `2025-06-18`, and the client must send `Authorization: Bearer <value of ECLIPSE_MCP_TOKEN>` on every request.
 
+Keep the token in the environment rather than pasting it into a client config, so the value never lands in a file. Every snippet below references it as a variable.
+
 ### Codex
 
 Add to `~/.codex/config.toml`, or to `.codex/config.toml` in a project:
@@ -103,19 +107,20 @@ bearer_token_env_var = "ECLIPSE_MCP_TOKEN"
 
 ### OpenCode
 
-Add to `opencode.json`:
+Add to `opencode.json` in your project:
 
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
-    "lunar": {
-      "type": "remote",
-      "url": "http://127.0.0.1:8124/mcp",
-      "enabled": true,
-      "oauth": false,
-      "headers": {
-        "Authorization": "Bearer {env:ECLIPSE_MCP_TOKEN}"
+    "servers": {
+      "lunar": {
+        "type": "remote",
+        "url": "http://127.0.0.1:8124/mcp",
+        "oauth": false,
+        "headers": {
+          "Authorization": "Bearer {env:ECLIPSE_MCP_TOKEN}"
+        }
       }
     }
   }
@@ -123,7 +128,13 @@ Add to `opencode.json`:
 ```
 
 `{env:NAME}` is expanded by OpenCode, so the token stays in the environment. `oauth: false` stops OpenCode from starting an OAuth flow against a 401, because lunar uses a static bearer token.
-Source: <https://opencode.ai/docs/mcp-servers/>
+
+OpenCode V2 nests servers under `mcp.servers`. V1 placed them directly under `mcp`; if your client is on V1, move the `lunar` object up one level.
+
+`opencode mcp add lunar --url http://127.0.0.1:8124/mcp --header "Authorization=Bearer {env:ECLIPSE_MCP_TOKEN}"` writes the entry to the project config for you. Add `--global` to write to `~/.config/opencode/opencode.json` instead; omit it to keep lunar project-scoped.
+
+Project config is loaded by traversing up from the working directory to the nearest Git directory, and it overrides the global config for keys they both set.
+Source: <https://opencode.ai/v2/docs/mcp-servers/> and <https://opencode.ai/docs/config/>
 
 ### Claude Code
 
@@ -264,7 +275,7 @@ Run `build.ps1` before you open a pull request. It fails on any compile error or
 
 ## License
 
-There is no license file in this repository, so the code is unlicensed and all rights are reserved by default. Add a LICENSE before redistributing it or building on it.
+MIT. See [LICENSE](LICENSE).
 
 ## Credits
 

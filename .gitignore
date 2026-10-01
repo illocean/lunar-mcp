@@ -1,3 +1,6 @@
+# Deepwork progress state
+.slim/deepwork/
+
 # Build output
 /out/
 /stage/

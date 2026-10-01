@@ -4,6 +4,8 @@ Bundle-Name: LUNAR Core
 Bundle-SymbolicName: com.github.lunar.core;singleton:=true
 Bundle-Version: 0.0.1
 Bundle-Vendor: LUNAR
+Bundle-License: MIT
+Bundle-Copyright: Copyright (c) 2026 lunar contributors
 Bundle-RequiredExecutionEnvironment: JavaSE-21
 Bundle-ActivationPolicy: lazy
 Automatic-Module-Name: com.github.lunar.core
