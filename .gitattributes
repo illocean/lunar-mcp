@@ -1,0 +1,5 @@
+* text=auto eol=lf
+
+# Windows scripts must keep CRLF to stay runnable from cmd.exe
+*.cmd text eol=crlf
+*.ps1 text eol=crlf

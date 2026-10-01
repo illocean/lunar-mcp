@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Hand-written because there is no bnd pass. Felix SCR resolves this file only because
+  MANIFEST.MF names it in Service-Component.
+
+  The namespace must be one Felix SCR recognises (scr/v1.0.0 .. v1.5.0); anything else parses
+  to zero components and the server silently never starts.
+
+  activate/deactivate/init/modified are ATTRIBUTES of <component>, not child elements. As a child
+  element the element is ignored, so deactivate never runs and the port stays bound after a restart.
+-->
+<component name="com.github.lunar.core.LunarServer"
+           immediate="true"
+           deactivate="deactivate"
+           xmlns="http://www.osgi.org/xmlns/scr/v1.3.0">
+  <service>
+    <provide interface="com.github.lunar.LunarServer"/>
+  </service>
+  <implementation class="com.github.lunar.LunarServer"/>
+</component>

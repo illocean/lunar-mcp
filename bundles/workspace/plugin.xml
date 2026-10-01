@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?eclipse version="3.4"?>
+<plugin>
+  <extension point="com.github.lunar.core.tools">
+    <provider class="com.github.lunar.workspace.WorkspaceTools"/>
+  </extension>
+  <extension point="org.eclipse.core.runtime.applications" id="verification">
+    <application cardinality="singleton-global" thread="main" visible="false">
+      <run class="com.github.lunar.verify.VerificationApplication"/>
+    </application>
+  </extension>
+</plugin>

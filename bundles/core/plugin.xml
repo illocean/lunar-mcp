@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?eclipse version="3.4"?>
+<plugin>
+  <extension-point id="tools" name="LUNAR Tools"/>
+  <extension point="com.github.lunar.core.tools">
+    <tool class="com.github.lunar.tools.ListProjects" riskTier="read"/>
+    <provider class="com.github.lunar.tools.CoreTools"/>
+  </extension>
+</plugin>

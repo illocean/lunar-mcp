@@ -1,0 +1,37 @@
+# Build output
+/out/
+/stage/
+/build-state.json
+
+# Compiled check classes
+/framework-check-bin/
+
+# Copies of jars taken before an install
+/backup/
+
+# Developer-only checks, probes and verification evidence
+/smoke/
+/bin/
+/research/
+/opencode-check/
+
+# Machine-local launchers and client configuration
+/Start-Eclipse.ps1
+/launch-opencode.ps1
+/launch-opencode.cmd
+/opencode.json
+/config/
+
+# Internal inventory whose tool counts predate the current server
+/TOOL-INVENTORY.md
+
+# IDE metadata
+/.metadata/
+/.settings/
+/.classpath
+/.project
+
+# OS files
+Thumbs.db
+desktop.ini
+.DS_Store
