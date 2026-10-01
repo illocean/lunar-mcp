@@ -34,15 +34,30 @@ import org.eclipse.jdt.junit.JUnitCore;
 import org.eclipse.jdt.launching.IJavaLaunchConfigurationConstants;
 import org.eclipse.jdt.launching.JavaRuntime;
 
-/** Real Eclipse verification bootstrap; fixture content lives entirely below lunar/smoke. */
+/**
+ * Real Eclipse verification bootstrap; fixture content lives entirely below a caller-chosen root.
+ *
+ * <p>The root arrives as the {@code -lunarRoot} argument, beside {@code -lunarStop} and
+ * {@code -lunarReady}. It is a contract with the launcher, not ambient state: the launcher already
+ * passes absolute stop/ready paths under {@code <root>/smoke/}, and {@link #seed} copies fixtures
+ * from {@code <root>/smoke/seeds}, so any root other than the one that caller used would fail later
+ * and less clearly. Passing it per launch also keeps two concurrent gates from sharing one setting.
+ * Eclipse does not guarantee a working directory for a launched application, so it cannot be relative
+ * and must not be compiled in from a single machine.
+ */
 public final class VerificationApplication implements IApplication {
-    private static final java.nio.file.Path ROOT = java.nio.file.Path.of("D:/EclipseIDE/lunar").toAbsolutePath().normalize();
     private static final String PROJECT = "LunarVerification";
     private final CountDownLatch stopped = new CountDownLatch(1);
     private volatile WatchService watcher;
+    private java.nio.file.Path root;
+
+    private java.nio.file.Path root() {
+        return root;
+    }
 
     @Override public Object start(IApplicationContext context) throws Exception {
         String[] arguments = (String[]) context.getArguments().get(IApplicationContext.APPLICATION_ARGS);
+        root = java.nio.file.Path.of(option(arguments,"-lunarRoot")).toAbsolutePath().normalize();
         java.nio.file.Path stopFile = inside(option(arguments,"-lunarStop"));
         java.nio.file.Path readyFile = inside(option(arguments,"-lunarReady"));
         Files.createDirectories(stopFile.getParent()); Files.createDirectories(readyFile.getParent());
@@ -58,7 +73,7 @@ public final class VerificationApplication implements IApplication {
         for (IBreakpoint breakpoint : DebugPlugin.getDefault().getBreakpointManager().getBreakpoints()) existingBreakpoints.add(breakpointKey(breakpoint));
         String nonce = UUID.randomUUID().toString();
         String prefix = "LunarVerification-" + nonce;
-        java.nio.file.Path fixture = ROOT.resolve("smoke/project");
+        java.nio.file.Path fixture = root().resolve("smoke/project");
         boolean created = false;
         try {
             // Reset only this owned fixture, so repeated gates start from the same compiler/debug state.
@@ -150,17 +165,17 @@ public final class VerificationApplication implements IApplication {
     private static String breakpointKey(IBreakpoint breakpoint) {
         return breakpoint.getMarker().getResource().getFullPath()+"#"+breakpoint.getMarker().getId();
     }
-    private static void seed(String name,java.nio.file.Path destination) throws Exception {
+    private void seed(String name,java.nio.file.Path destination) throws Exception {
         Files.createDirectories(destination.getParent());
-        Files.copy(ROOT.resolve("smoke/seeds/"+name),destination,java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        Files.copy(root().resolve("smoke/seeds/"+name),destination,java.nio.file.StandardCopyOption.REPLACE_EXISTING);
     }
     private static String option(String[] arguments,String name) {
         for (int i = 0; i+1 < arguments.length; i++) if (arguments[i].equals(name)) return arguments[i+1];
         throw new IllegalArgumentException("Missing " + name);
     }
-    private static java.nio.file.Path inside(String path) {
+    private java.nio.file.Path inside(String path) {
         var value = java.nio.file.Path.of(path).toAbsolutePath().normalize();
-        if (!value.startsWith(ROOT.resolve("smoke"))) throw new IllegalArgumentException("Verification artifacts must stay under lunar/smoke");
+        if (!value.startsWith(root().resolve("smoke"))) throw new IllegalArgumentException("Verification artifacts must stay under lunar/smoke (root " + root() + ")");
         return value;
     }
     @Override public void stop() {

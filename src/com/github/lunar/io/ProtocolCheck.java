@@ -29,7 +29,7 @@ public final class ProtocolCheck {
         int port;
         try (ServerSocket socket = new ServerSocket(0)) { port = socket.getLocalPort(); }
         McpHttpServer server = new McpHttpServer("check-token");
-        server.start(port, "/mcp");
+        server.start("127.0.0.1", port, "/mcp");
         try {
             URI uri = URI.create("http://127.0.0.1:" + port + "/mcp");
             HttpClient client = HttpClient.newHttpClient();

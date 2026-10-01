@@ -57,15 +57,21 @@ public final class McpHttpServer {
         this.token = token;
     }
 
-    public void start(int port, String contextPath) throws IOException {
+    public void start(String host, int port, String contextPath) throws IOException {
         // Loopback only, never 0.0.0.0: an unauthenticated-by-default MCP endpoint must not be
-        // reachable from off-box even if the token check below were ever weakened.
+        // reachable from off-box even if the token check below were ever weakened. The host is
+        // therefore resolved by LunarServer and must already be a loopback address; the bind
+        // below rejects anything else rather than trusting the caller.
+        InetAddress bind = InetAddress.getByName(host);
+        if (!bind.isLoopbackAddress())
+            throw new IOException("refusing to bind non-loopback address " + host
+                    + "; lunar serves an IDE workspace and must stay on this machine");
         // Native values are cached by the JDK's first HttpServer initialization. These defaults
         // do not claim to override an HttpServer another Eclipse component already initialized.
         defaultProperty("sun.net.httpserver.maxReqTime", "15");
         defaultProperty("sun.net.httpserver.maxRspTime", "125");
         defaultProperty("jdk.httpserver.maxConnections", "64");
-        http = HttpServer.create(new InetSocketAddress(InetAddress.getByName("127.0.0.1"), port), 16);
+        http = HttpServer.create(new InetSocketAddress(bind, port), 16);
         pool = new java.util.concurrent.ThreadPoolExecutor(8, 8, 0L,
                 java.util.concurrent.TimeUnit.MILLISECONDS,
                 new java.util.concurrent.ArrayBlockingQueue<>(32), workerThreads(),

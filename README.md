@@ -57,7 +57,7 @@ Codex, OpenCode, Claude Code, and any other MCP client, as long as it speaks str
 
    The script refuses to run while an Eclipse process from that installation is alive. It copies the five lunar jars currently in `dropins` to `backup\installed-<timestamp>`, then copies the five newly built jars into `<eclipse>\dropins`.
 
-4. Start Eclipse with `-clean`. The server binds as an OSGi Declarative Services immediate component when its bundle resolves, so there is no preference page to open.
+4. Start Eclipse with `-clean -consoleLog`. The server binds as an OSGi Declarative Services immediate component when its bundle resolves, so there is no preference page to open. `-consoleLog` is what makes a startup failure visible in the console as well as the Error Log.
 
 5. Confirm the server is up. Three checks should agree: the endpoint descriptor exists, port 8124 is listening, and an authenticated request answers.
 
@@ -76,16 +76,27 @@ Codex, OpenCode, Claude Code, and any other MCP client, as long as it speaks str
 
 ### Paths you have to change
 
-The build is pinned to one machine's layout. On any other machine, edit these four locations before the first build:
+The build is pinned to one machine's layout. On any other machine, edit these three locations before the first build:
 
 | File and line | Value | Meaning |
 | --- | --- | --- |
 | `build.ps1:4` | `D:\EclipseIDE\.p2\pool\plugins` | directory holding the pinned Eclipse jars the build compiles against |
 | `build.ps1:96` | `D:\EclipseIDE\eclipse\` | Eclipse installation whose running processes block an install |
 | `build.ps1:98` | `D:\EclipseIDE\eclipse\dropins` | dropins folder the jars are copied into |
-| `src/com/github/lunar/SelfCheck.java:360` | `D:\EclipseIDE\lunar\smoke` | existing directory the build-time check uses as a temporary parent |
 
 The jar file names in `build.ps1` are pinned to one Eclipse release train too. If your installation ships other bundle versions, the script fails with `Missing pinned jar: <name>`; update the list to match your pool.
+
+### Configuration
+
+The token is the only setting you have to change. Everything else has a working default, and each has an environment variable that overrides it:
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `ECLIPSE_MCP_TOKEN` | none, required | Bearer token for every request. A blank value makes the server refuse to bind. |
+| `LUNAR_MCP_HOST` | `127.0.0.1` | Must resolve to a loopback address. A routable address is refused, because lunar drives a local IDE workspace. |
+| `LUNAR_MCP_PORT` | `8124` | Anything that is not a port in 1-65535 is ignored with a warning in the Error Log, and the default is used. |
+
+Set them at user scope, like the token, and restart Eclipse. The server resolves them once at startup, so a value changed while Eclipse is running has no effect until it restarts. If the port is already taken, the server fails loudly and prints both the port and the variable to change; it does not silently pick a different one.
 
 ## Connect your client
 

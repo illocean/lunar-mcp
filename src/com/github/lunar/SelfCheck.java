@@ -14,6 +14,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.jar.JarFile;
@@ -169,12 +170,89 @@ public final class SelfCheck {
         // --- endpoint.json atomicity ---
         checkEndpointFile();
 
+        // --- configuration surface ---
+        checkConfiguration();
+
         System.out.println();
         if (failures == 0) {
             System.out.println("SELFCHECK PASS (" + total + " checks, 0 failures)");
         } else {
             System.out.println("SELFCHECK FAIL (" + total + " checks, " + failures + " failures)");
             System.exit(1);
+        }
+    }
+
+    /**
+     * The endpoint address is configurable, so the defaults the README documents must stay exactly
+     * 127.0.0.1 and 8124, and the loopback guard must actually refuse a routable address. Both are
+     * asserted here because a silent change to either breaks every published client URL, and because
+     * the host override is the one setting that could widen the bind surface.
+     */
+    private static void checkConfiguration() {
+        yes("documented default port is 8124", LunarServer.DEFAULT_PORT == 8124);
+        yes("documented default host is 127.0.0.1",
+                "127.0.0.1".equals(LunarServer.DEFAULT_HOST));
+        yes("context path is /mcp", "/mcp".equals(LunarServer.CONTEXT_PATH));
+        // These call the shipped resolution logic, so a change there cannot pass a stale copy.
+        yes("unset host resolves to the documented default",
+                LunarServer.hostFrom(null).equals(LunarServer.DEFAULT_HOST));
+        yes("blank host resolves to the documented default",
+                LunarServer.hostFrom("  ").equals(LunarServer.DEFAULT_HOST));
+        yes("configured host is honoured", LunarServer.hostFrom("localhost").equals("localhost"));
+        yes("configured host is trimmed", LunarServer.hostFrom(" localhost ").equals("localhost"));
+        yes("unset port resolves to the documented default", LunarServer.portFrom(null) == 8124);
+        yes("blank port resolves to the documented default", LunarServer.portFrom(" ") == 8124);
+        yes("configured port is honoured", LunarServer.portFrom("9001") == 9001);
+        yes("configured port is trimmed", LunarServer.portFrom(" 9002 ") == 9002);
+        // A typo must not silently move the endpoint off its documented address.
+        yes("non-numeric port falls back", LunarServer.portFrom("eighty") == 8124);
+        yes("port 0 falls back", LunarServer.portFrom("0") == 8124);
+        yes("port above 65535 falls back", LunarServer.portFrom("70000") == 8124);
+        yes("negative port falls back", LunarServer.portFrom("-1") == 8124);
+        // The guard itself: a routable bind address must be refused before any listener exists.
+        // If the guard ever regresses, the listener it accepted would stay open for the life of
+        // this JVM on every interface, so the reference is held and stopped either way.
+        McpHttpServer leaked = null;
+        try {
+            leaked = new McpHttpServer(UUID.randomUUID().toString());
+            leaked.start("0.0.0.0", 0, "/mcp");
+            fail("non-loopback bind is refused", "0.0.0.0 was accepted");
+        } catch (IOException expected) {
+            yes("non-loopback bind is refused", true);
+        } finally {
+            if (leaked != null) {
+                try {
+                    leaked.stop();
+                } catch (Exception ignored) {
+                    // Nothing to release if the guard threw before allocating.
+                }
+            }
+        }
+        // IPv6 host literals must be bracketed, or the published URL is unparseable.
+        yes("default host renders a plain URL",
+                "http://127.0.0.1:8124/mcp".equals(EndpointFile.url("127.0.0.1", 8124, "/mcp")));
+        yes("IPv6 host is bracketed",
+                "http://[::1]:8124/mcp".equals(EndpointFile.url("::1", 8124, "/mcp")));
+        // A user may supply the brackets themselves; they must not be doubled.
+        yes("already-bracketed IPv6 host is not doubled",
+                "http://[::1]:8124/mcp".equals(EndpointFile.url("[::1]", 8124, "/mcp")));
+        yes("IPv4-mapped IPv6 host is bracketed",
+                "http://[::ffff:127.0.0.1]:8124/mcp".equals(
+                        EndpointFile.url("::ffff:127.0.0.1", 8124, "/mcp")));
+        yes("hostname renders plain",
+                "http://localhost:8124/mcp".equals(EndpointFile.url("localhost", 8124, "/mcp")));
+        // Platform precondition, not lunar coverage: it pins that the JDK agrees with the guard's
+        // own predicate on the host names above. It cannot fail because of a change in lunar.
+        yes("JDK agrees on loopback classification",
+                isLoopback("127.0.0.1") && isLoopback("localhost") && !isLoopback("0.0.0.0")
+                        && !isLoopback("192.168.1.10"));
+    }
+
+    private static boolean isLoopback(String host) {
+        try {
+            return InetAddress.getByName(host).isLoopbackAddress();
+        } catch (IOException e) {
+            return false;
         }
     }
 
@@ -260,7 +338,7 @@ public final class SelfCheck {
         }
         McpHttpServer server = new McpHttpServer(TOKEN);
         try {
-            server.start(port, "/mcp");
+            server.start("127.0.0.1", port, "/mcp");
         } catch (IOException e) {
             fail("server starts on an ephemeral port", e.toString());
             return;
@@ -357,8 +435,10 @@ public final class SelfCheck {
     private static void checkEndpointFile() {
         Path dir;
         try {
-            dir = Files.createTempDirectory(Path.of("D:\\EclipseIDE\\lunar\\smoke"),
-                    "lunar-selfcheck");
+            // java.io.tmpdir, not a path compiled in from one machine. The check only needs a writable
+            // parent, and every JDK resolves that per-platform; a fixed Windows path meant this
+            // class could not run anywhere except the machine that built it.
+            dir = Files.createTempDirectory("lunar-selfcheck");
         } catch (IOException e) {
             fail("temp dir for endpoint.json", e.toString());
             return;

@@ -49,12 +49,29 @@ final class EndpointFile {
         }
     }
 
+    /**
+     * Renders the endpoint URL. An IPv6 literal needs brackets around the host or the colon that
+     * separates it from the port is ambiguous, and every client parsing this file would reject the
+     * result. {@code LUNAR_MCP_HOST} made the host a value rather than a constant, so the two forms
+     * both have to be handled.
+     */
+    static String url(String host, int port, String path) {
+        return "http://" + bracket(host) + ":" + port + path;
+    }
+
+    /** An IPv6 literal needs brackets, but a user may well have supplied them already. */
+    private static String bracket(String host) {
+        if (host.startsWith("[") && host.endsWith("]"))
+            return host;
+        return host.indexOf(':') >= 0 ? "[" + host + "]" : host;
+    }
+
     void write(String host, int port, String path, String protocolVersion) throws IOException {
         Files.createDirectories(file.getParent());
         // The token is deliberately absent: this file sits in the workspace and is readable by
         // anything that can read the workspace. Only the token's presence is implied, never its value.
         String json = Json.obj(
-                "url", Json.quote("http://" + host + ":" + port + path),
+                "url", Json.quote(url(host, port, path)),
                 "port", Integer.toString(port),
                 "path", Json.quote(path),
                 "protocolVersion", Json.quote(protocolVersion),
