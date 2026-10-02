@@ -1,6 +1,8 @@
 param(
     [switch]$Install,
     [switch]$NoInstall,
+    # Install the built bundles as a p2 update site instead of loose jars in dropins.
+    [switch]$InstallP2,
     # Both default to discovery; see lunar-env.ps1 for the full resolution order.
     [string]$EclipseHome,
     [string]$PoolDir
@@ -8,6 +10,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $lunarRoot = $PSScriptRoot
 . (Join-Path $lunarRoot 'lunar-env.ps1')
+. (Join-Path $lunarRoot 'lunar-p2.ps1')
 
 # Compile-time classpath. Only the bundles lunar actually Require-Bundle carry a
 # minimum version, and those match the versions declared in the manifests -- a
@@ -87,7 +90,11 @@ foreach ($bundle in @('core', 'workspace', 'run', 'debug', 'io')) {
     if ($bundle -eq 'io') {
         Copy-Item -LiteralPath (Join-Path $sourceDir 'OSGI-INF') -Destination $stageDir -Recurse
     }
-    $artifact = Join-Path $outputDir ('com.github.lunar.' + $bundle + '_0.0.1.jar')
+    # Named after the manifest's own headers, not a literal here. The p2 feature has
+    # to list each <plugin> at exactly Bundle-Version, so a name typed in this file is
+    # one more thing a release bump has to remember to change.
+    $identity = Get-LunarBundleIdentity -ManifestDir $metadataDir
+    $artifact = Join-Path $outputDir ($identity.id + '_' + $identity.version + '.jar')
     & jar cfm $artifact (Join-Path $metadataDir 'META-INF\MANIFEST.MF') -C $stageDir .
     if ($LASTEXITCODE -ne 0) { throw "Lunar $bundle packaging failed" }
     $artifacts += $artifact
@@ -103,13 +110,27 @@ if ($LASTEXITCODE -ne 0) { throw 'Lunar framework check failed' }
 & java -ea -cp $checkPath com.github.lunar.IntegrationCheck @artifacts
 if ($LASTEXITCODE -ne 0) { throw 'Lunar domain integration check failed' }
 if ($Install -and $NoInstall) { throw 'Choose -Install or -NoInstall, not both' }
+if ($Install -and $InstallP2) {
+    throw @'
+Choose one way to install. The loose jars in dropins and the update site both
+resolve the same bundles, and having both installed breaks Eclipse's resolution.
+
+    -Install    loose jars in <eclipse home>\dropins
+    -InstallP2  the update site in .\site, managed by p2
+'@
+}
 $backupDir = $null
+$p2SiteDir = $null
+if ($Install -or $InstallP2) {
+    Assert-LunarEclipseStopped -EclipseHome $eclipseHomePath
+}
+if ($InstallP2) {
+    # Also checked inside Install-LunarP2, where the invariant belongs so every
+    # caller gets it. Checked here too so the user finds out before compiling
+    # rather than after the site has already been published.
+    Assert-LunarNoDropinsCopy -EclipseHome $eclipseHomePath
+}
 if ($Install) {
-    # Eclipse rewrites dropins/ while it is running, so an install into a live
-    # instance either fails or is silently discarded on the next start.
-    $running = @(Get-Process eclipse,eclipsec -ErrorAction SilentlyContinue |
-        Where-Object { $_.Path -and $_.Path.StartsWith($eclipseHomePath + '\', [StringComparison]::OrdinalIgnoreCase) })
-    if ($running.Count) { throw 'Stop this Eclipse instance before installing Lunar bundles' }
     $dropinsDir = Join-Path $eclipseHomePath 'dropins'
     if (-not (Test-Path -LiteralPath $dropinsDir)) {
         New-Item -ItemType Directory -Path $dropinsDir -Force | Out-Null
@@ -121,12 +142,43 @@ if ($Install) {
     }
     foreach ($artifact in $artifacts) { Copy-Item -LiteralPath $artifact -Destination $dropinsDir -Force }
 }
+if ($InstallP2) {
+    $p2SiteDir = Join-Path $lunarRoot 'site'
+    # The publisher reads <source>/features and <source>/plugins; anything else in
+    # the directory is ignored, so this is staged rather than pointed at the build
+    # output to keep the two layouts from colliding.
+    $p2SourceDir = Join-Path $outputDir 'p2repo'
+    foreach ($sub in @('features\com.github.lunar.feature', 'plugins')) {
+        New-Item -ItemType Directory -Path (Join-Path $p2SourceDir $sub) -Force | Out-Null
+    }
+    foreach ($artifact in $artifacts) {
+        Copy-Item -LiteralPath $artifact -Destination (Join-Path $p2SourceDir 'plugins')
+    }
+    $bundles = Get-LunarBundleIdentityList -LunarRoot $lunarRoot
+    $featureVersion = New-LunarFeatureXml -Bundles $bundles `
+        -FeatureId 'com.github.lunar.feature' -Path (Join-Path $p2SourceDir 'features\com.github.lunar.feature\feature.xml')
+    Publish-LunarSite -EclipseHome $eclipseHomePath -SourceDir $p2SourceDir -SiteDir $p2SiteDir `
+        -FeatureId 'com.github.lunar.feature' -Version $featureVersion
+    $profile = Get-LunarProfileName -EclipseHome $eclipseHomePath
+    # Verify first. It costs a second and proves the site resolves and the plan is
+    # satisfiable before the profile is touched at all.
+    $verify = Install-LunarP2 -EclipseHome $eclipseHomePath -SiteDir $p2SiteDir -Profile $profile `
+        -FeatureId 'com.github.lunar.feature' -VerifyOnly
+    if ($verify -ne 0) { throw 'The update site did not resolve; nothing was installed.' }
+    if ((Install-LunarP2 -EclipseHome $eclipseHomePath -SiteDir $p2SiteDir -Profile $profile `
+            -FeatureId 'com.github.lunar.feature') -ne 0) {
+        throw 'The p2 director could not install lunar.'
+    }
+    Assert-LunarP2Installed -DataArea (Resolve-LunarP2DataArea -EclipseHome $eclipseHomePath) -Bundles $bundles
+}
 $artifactDetails = @(foreach ($artifact in $artifacts) {
     @{ path = $artifact; bytes = (Get-Item -LiteralPath $artifact).Length;
        sha256 = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash }
 })
 @{ classesPath = $classesDir; classPath = $classPath; artifact = $ioArtifact; artifacts = $artifacts;
     artifactDetails = $artifactDetails; checkedAt = (Get-Date -Format o);
-    installed = [bool]$Install; installedBackup = $backupDir; metadataPath = (Join-Path $lunarRoot 'bundles') } |
+    installed = [bool]$Install; installedBackup = $backupDir; installedP2 = [bool]$InstallP2;
+    p2Site = $p2SiteDir; metadataPath = (Join-Path $lunarRoot 'bundles') } |
     ConvertTo-Json | Set-Content -LiteralPath (Join-Path $lunarRoot 'build-state.json') -Encoding UTF8
-Write-Output ('LUNAR BUILD PASS: 5 bundles at ' + $outputDir + '; installed=' + [bool]$Install)
+Write-Output ('LUNAR BUILD PASS: 5 bundles at ' + $outputDir + '; installed=' + [bool]$Install +
+    '; installedP2=' + [bool]$InstallP2)

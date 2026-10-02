@@ -47,7 +47,7 @@ Codex, OpenCode, Claude Code, and any other MCP client, as long as it speaks str
    build.cmd
    ```
 
-   `build.cmd` delegates to `build.ps1`, which locates your Eclipse and its p2 pool (see [Paths you have to change](#paths-you-have-to-change)), compiles every `.java` file under `src` with `javac --release 21`, packages five jars into a timestamped directory under `out`, then runs four check classes (`SelfCheck`, `ProtocolCheck`, `FrameworkCheck`, `IntegrationCheck`) and aborts if any fails. It records jar paths, sizes and SHA-256 hashes in `build-state.json`. Maven, Gradle, Ant and Tycho are not used.
+   `build.cmd` delegates to `build.ps1`, which locates your Eclipse and its p2 pool (see [Finding your Eclipse](#finding-your-eclipse)), compiles every `.java` file under `src` with `javac --release 21`, packages five jars into a timestamped directory under `out`, then runs four check classes (`SelfCheck`, `ProtocolCheck`, `FrameworkCheck`, `IntegrationCheck`) and aborts if any fails. It records jar paths, sizes and SHA-256 hashes in `build-state.json`. Maven, Gradle, Ant and Tycho are not used.
 
    The check script has no Eclipse dependency of its own and is worth running if you change `lunar-env.ps1`. It also asserts that the minimum versions in `build.ps1` still match the ones the bundle manifests declare, so the two cannot drift apart:
 
@@ -62,6 +62,8 @@ Codex, OpenCode, Claude Code, and any other MCP client, as long as it speaks str
    ```
 
    The script refuses to run while an Eclipse process from that installation is alive. It copies the five lunar jars currently in `dropins` to `backup\installed-<timestamp>`, then copies the five newly built jars into `<eclipse>\dropins`.
+
+   To install as a p2 update site instead, see [Installing from the update site](#installing-from-the-update-site). The two are mutually exclusive.
 
 4. Start Eclipse with `-clean -consoleLog`. The server binds as an OSGi Declarative Services immediate component when its bundle resolves, so there is no preference page to open. `-consoleLog` is what makes a startup failure visible in the console as well as the Error Log.
 
@@ -293,9 +295,74 @@ Expect HTTP 200 and a JSON-RPC result listing 18 tools. Drop the `Authorization`
 | `get_delta` | Compare a retained baseline with a fresh read | `baselineId` |
 | `batch` | Run up to 16 loaded tools sequentially, stopping on the first failure | `calls` |
 
+## Installing from the update site
+
+`-Install` copies loose jars into `dropins`. That is the simplest thing that works and it needs no p2 at all. If you would rather have lunar managed as an installed feature, `build.ps1 -InstallP2` publishes a repository into `site\` and installs it with the p2 director.
+
+```powershell
+# Eclipse must be closed.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -InstallP2
+```
+
+What it does: generates `features\com.github.lunar.feature\feature.xml` and `category.xml` from the bundle manifests, runs `org.eclipse.equinox.p2.publisher.FeaturesAndBundlesPublisher` and then `CategoryPublisher` into `site\`, resolves the plan with a `-verifyOnly` director run, and only then installs `com.github.lunar.feature.feature.group`.
+
+There is no Tycho or PDE build here, so `feature.xml` is generated rather than compiled. It is written from `Bundle-SymbolicName` and `Bundle-Version` in the manifests, and each jar is named `<id>_<version>.jar` to match. That matters because p2 reads a feature entry's version as an **exact** match rather than a floor, so a stale value would publish and then install nothing.
+
+To do the same by hand:
+
+```powershell
+# 1. Lay the jars out the way the publisher expects, and write the two definitions
+#    beside them. feature.xml needs one <plugin> per jar, each at its exact
+#    Bundle-Version; category.xml is optional and only names the site in the wizard.
+mkdir site, plugins, features\com.github.lunar.feature
+copy out\<build>\com.github.lunar.*.jar plugins\
+#    features\com.github.lunar.feature\feature.xml   id="com.github.lunar.feature" version="0.0.1"
+#    category.xml                                    <site><feature id="com.github.lunar.feature" version="0.0.1"/>
+
+# 2. Publish the bundles and feature. -source must be the directory holding
+#    plugins\ and features\, and eclipse.p2.data.area is where this run expects to
+#    install from, so run it against your own installation.
+cd C:\path\to\eclipse
+.\eclipsec.exe -nosplash -consoleLog `
+  -application org.eclipse.equinox.p2.publisher.FeaturesAndBundlesPublisher `
+  -source C:\path\to\lunar -metadataRepository file:/C:/path/to/lunar/site `
+  -artifactRepository file:/C:/path/to/lunar/site -append -compress
+
+# 3. Publish the category into the same repository. Order matters: a category whose
+#    IUs do not exist yet produces nothing at all, so skipping this or inverting the
+#    two steps leaves a site with no entries.
+.\eclipsec.exe -nosplash -consoleLog `
+  -application org.eclipse.equinox.p2.publisher.CategoryPublisher `
+  -metadataRepository file:/C:/path/to/lunar/site `
+  -artifactRepository file:/C:/path/to/lunar/site `
+  -categoryDefinition file:/C:/path/to/lunar/category.xml -categoryQualifier lunar
+
+# 4. Install. Add -profile <name> to target a non-default profile; the name is in
+#    eclipse.p2.profile in <eclipse>\configuration\config.ini. .feature.group is part
+#    of the IU id, not a version, so it must not be split on the slash.
+.\eclipsec.exe -nosplash -consoleLog `
+  -application org.eclipse.equinox.p2.director `
+  -repository file:/C:/path/to/lunar/site `
+  -destination C:\path\to\eclipse `
+  -installIU com.github.lunar.feature.feature.group
+```
+
+Step 4 is `-verifyOnly`-able: add it and the director resolves the plan and changes
+nothing. It is not optional-without-meaning though — without `-installIU` it prints its
+usage and exits 0 without loading the repository.
+
+Or, without touching the command line, add `file:/C:/path/to/lunar/site` under **Help ▸ Install New Software**, then install *Lunar*.
+
+Two things worth knowing before you choose this route:
+
+- **The two install routes are mutually exclusive.** A p2 install lands in the pool named by `eclipse.p2.data.area` while `dropins` jars are read separately, so both copies of `com.github.lunar.core` resolve to the same id and Eclipse reports the bundle as installed from two locations. `-InstallP2` refuses while lunar jars are in `dropins`, and tells you how to move them.
+- **A rebuild at the same version will not reinstall.** p2 treats the same id and version as the same artifact and exits 0 having done nothing, so `-InstallP2` checks the jars actually landed in the pool and fails loudly when they did not. p2 also deliberately leaves files on disk at uninstall, so a restart is required either way. Bump `Bundle-Version` in `bundles\*\META-INF\MANIFEST.MF` to cut a new one. For iterating on code against your own Eclipse, use `-Install`.
+- **The installed feature may not be listed in Help ▸ About ▸ Installation Details.** Only the `.feature.group` is installed, and listing installed features there is off by default. Add `-profileproperties org.eclipse.update.install.features=true` to the director arguments if you want it to show up. The bundles resolve either way.
+
 ## Status and known limitations
 
-- There is no p2 update site and no Tycho build. You produce jars with `build.ps1` and drop them into `dropins`.
+- `-InstallP2` publishes a p2 update site; there is still no Tycho build. The default `-Install` route produces jars and puts them in `dropins`.
+- The publisher boots the full Eclipse product named in `eclipse.ini`, so bundles already in `dropins` are activated during the run. With lunar there, one harmless `LUNAR MCP endpoint failed to start` is logged, because a headless product has no workspace yet. The publish itself is unaffected.
 - Tools act on saved files on disk, not on unsaved editor buffers. Mutating calls reject dirty text and JDT buffers rather than overwrite them.
 - Writes are guarded: `write_file`, `move_file`, `delete_file`, `apply_edit` and `apply_quick_fix` all require the current `read_file` hash as `expectedHash`.
 - `get_problems` reads markers that already exist and triggers no build. Call `build_project` for current diagnostics, and read its marker counts: `built=true` does not mean there were no errors.

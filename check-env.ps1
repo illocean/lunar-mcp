@@ -39,6 +39,7 @@ function Assert-Throws {
 }
 
 . (Join-Path $PSScriptRoot 'lunar-env.ps1')
+. (Join-Path $PSScriptRoot 'lunar-p2.ps1')
 
 Write-Host 'ConvertTo-LunarVersion'
 Assert-True 'manifest form 3.34.100' ((ConvertTo-LunarVersion '3.34.100').Micro -eq 100)
@@ -270,6 +271,165 @@ Assert-True 'no bundle carries a floor that no manifest declares' `
     (@($buildFloors.Keys | Where-Object {
         $_ -notlike 'com.github.lunar.*' -and -not $manifestFloors.ContainsKey($_)
       }).Count -eq 0)
+
+Write-Host 'lunar-p2: identity, feature.xml and category.xml'
+$bundles = Get-LunarBundleIdentityList -LunarRoot $PSScriptRoot
+Assert-True 'five bundles are found' ($bundles.Count -eq 5)
+Assert-True 'every bundle id is a com.github.lunar id' `
+    (@($bundles | Where-Object { $_.id -notlike 'com.github.lunar.*' }).Count -eq 0)
+Assert-True 'the io bundle is last, as the publisher order expects' `
+    ($bundles[4].id -eq 'com.github.lunar.io')
+
+# Every version must be purely numeric. A qualifier would ship literally here --
+# there is no PDE or Tycho to substitute it, so p2 would keep seeing one IU id and
+# would never install the rebuilt artifact.
+Assert-True 'every bundle version is numeric, with nothing left to substitute' `
+    (@($bundles | Where-Object { $_.version -notmatch '^\d+(\.\d+){2,3}$' }).Count -eq 0)
+
+# build.ps1 names each jar <id>_<version>.jar, so the identity and the artifact name
+# are one fact. Verified against the name build.ps1 actually produces.
+foreach ($bundle in $bundles) {
+    Assert-True ($bundle.id + ' is packaged as ' + $bundle.id + '_' + $bundle.version + '.jar') `
+        ((Select-String -LiteralPath (Join-Path $PSScriptRoot 'build.ps1') -SimpleMatch `
+            '$identity.id + ''_'' + $identity.version' -Quiet))
+}
+
+$p2Sandbox = Join-Path ([IO.Path]::GetTempPath()) ('lunar-p2-' + [Guid]::NewGuid().ToString('N'))
+try {
+    New-Item -ItemType Directory -Path $p2Sandbox -Force | Out-Null
+    $featurePath = Join-Path $p2Sandbox 'feature.xml'
+    $featureVersion = New-LunarFeatureXml -Bundles $bundles -FeatureId 'com.github.lunar.feature' -Path $featurePath
+    Assert-True 'the feature version is the highest bundle version' `
+        ($featureVersion -eq (($bundles | Sort-Object { [version]$_.version } -Descending)[0].version))
+
+    $featureXml = [xml](Get-Content -LiteralPath $featurePath -Raw)
+    Assert-True 'feature.xml is well-formed and named as asked' `
+        ($featureXml.feature.id -eq 'com.github.lunar.feature')
+    Assert-True 'feature.xml lists every bundle' `
+        (@($featureXml.feature.plugin).Count -eq $bundles.Count)
+
+    # The trap worth a test: p2 reads a feature entry's version as an EXACT match
+    # against Bundle-Version, not a floor. A feature that says 3.24.0 for a bundle
+    # built at 3.24.100 publishes, then resolves to nothing at install time.
+    $pluginsById = @{}
+    foreach ($plugin in @($featureXml.feature.plugin)) { $pluginsById[$plugin.id] = $plugin.version }
+    foreach ($bundle in $bundles) {
+        Assert-True ($bundle.id + ' is pinned at exactly ' + $bundle.version) `
+            ($pluginsById.ContainsKey($bundle.id) -and $pluginsById[$bundle.id] -eq $bundle.version)
+    }
+
+    # Set-Content -Encoding UTF8 writes a BOM under Windows PowerShell 5.1, and a
+    # BOM ahead of the declaration is a free way to fail in a Java parser.
+    $leading = [System.IO.File]::ReadAllBytes($featurePath)[0..2]
+    Assert-True 'feature.xml is written without a BOM' `
+        (-not ($leading[0] -eq 0xEF -and $leading[1] -eq 0xBB -and $leading[2] -eq 0xBF))
+
+    $categoryPath = Join-Path $p2Sandbox 'category.xml'
+    New-LunarCategoryXml -FeatureId 'com.github.lunar.feature' -Version $featureVersion -Path $categoryPath
+    $categoryXml = [xml](Get-Content -LiteralPath $categoryPath -Raw)
+    Assert-True 'category.xml points at the feature that was published' `
+        ($categoryXml.site.feature.id -eq 'com.github.lunar.feature' -and
+         $categoryXml.site.feature.version -eq $featureVersion)
+    # A category whose IUs do not exist produces no IU at all, so the mapping has to
+    # be by name: <category-def name=..> is what <category name=..> refers to.
+    Assert-True 'the category name matches the def it is assigned to' `
+        ($categoryXml.site.feature.category.name -eq $categoryXml.site.'category-def'.name)
+
+    Assert-True 'the installable IU id keeps .feature.group as part of the id' `
+        ((Get-LunarFeatureGroupId -FeatureId 'com.github.lunar.feature') -eq 'com.github.lunar.feature.feature.group')
+
+    # 'file:/D:/path'. Handing the director 'file:D:/path' or a bare path fails to
+    # resolve, so the slash before the drive letter is the thing to hold.
+    $uri = Get-LunarP2Uri -Path $p2Sandbox
+    Assert-True 'a repository URI keeps the slash before the drive letter' `
+        ($uri -match '^file:/{1,3}[A-Za-z]:/')
+
+    # A '#' is a URI fragment delimiter and a '%' starts an escape, so a repository
+    # path containing either truncates or decodes to somewhere else entirely. Both
+    # are legal in a Windows directory name, so this is a real path, not a contrived
+    # one -- and the failure it causes is 'repository not found' with nothing else.
+    $oddDir = Join-Path $p2Sandbox 'we#ird 100%'
+    New-Item -ItemType Directory -Path $oddDir -Force | Out-Null
+    $oddUri = Get-LunarP2Uri -Path $oddDir
+    Assert-True 'a repository URI escapes # and % in the path' `
+        ($oddUri -match '%23' -and $oddUri -match '%25' -and $oddUri -notmatch '#')
+    Assert-True 'an escaped repository URI resolves back to the same directory' `
+        (([uri]$oddUri).LocalPath.TrimEnd('\') -eq (Resolve-Path -LiteralPath $oddDir).Path.TrimEnd('\'))
+
+    Assert-Throws 'a manifest without Bundle-SymbolicName is rejected' {
+        $badDir = Join-Path $p2Sandbox 'badbundle'
+        New-Item -ItemType Directory -Path (Join-Path $badDir 'META-INF') -Force | Out-Null
+        $mf = Join-Path $badDir 'META-INF\MANIFEST.MF'
+        Set-Content -LiteralPath $mf -Value @('Manifest-Version: 1.0', 'Bundle-Version: 0.0.1')
+        Get-LunarBundleIdentity -ManifestDir $badDir
+    } 'No Bundle-SymbolicName'
+
+    # Installing the site on top of loose jars resolves every bundle twice.
+    $fakeEclipse = Join-Path $p2Sandbox 'eclipse'
+    $fakeDropins = Join-Path $fakeEclipse 'dropins'
+    New-Item -ItemType Directory -Path $fakeDropins -Force | Out-Null
+    Assert-True 'an empty dropins is not a conflict' `
+        ($null -eq (Assert-LunarNoDropinsCopy -EclipseHome $fakeEclipse))
+    New-Item -ItemType File -Path (Join-Path $fakeDropins 'com.github.lunar.core_0.0.1.jar') -Force | Out-Null
+    Assert-Throws 'loose jars in dropins block the site install' {
+        Assert-LunarNoDropinsCopy -EclipseHome $fakeEclipse
+    } 'two copies'
+
+    # The exploded form is picked up just as eagerly as the jar, and a jar-only test
+    # would wave it straight through into an install that breaks Eclipse's resolution.
+    Remove-Item -LiteralPath (Join-Path $fakeDropins 'com.github.lunar.core_0.0.1.jar') -Force
+    New-Item -ItemType Directory -Path (Join-Path $fakeDropins 'com.github.lunar.core_0.0.1') -Force | Out-Null
+    Assert-Throws 'an exploded bundle directory in dropins blocks the site install too' {
+        Assert-LunarNoDropinsCopy -EclipseHome $fakeEclipse
+    } 'two copies'
+    Remove-Item -LiteralPath (Join-Path $fakeDropins 'com.github.lunar.core_0.0.1') -Recurse -Force
+
+    # config.ini states the data area as an escaped file: URI, and an install lands
+    # there rather than anywhere derivable from the install path.
+    $fakeConfig = Join-Path $fakeEclipse 'configuration\config.ini'
+    New-Item -ItemType Directory -Path (Split-Path -Parent $fakeConfig) -Force | Out-Null
+    $fakeArea = Join-Path $p2Sandbox 'my area\.p2'
+    $areaIni = 'eclipse.p2.data.area=file\:/' + ($fakeArea -replace '\\', '/') -replace ' ', '%20'
+    Set-Content -LiteralPath $fakeConfig -Value $areaIni
+    Assert-True 'the p2 data area is read out of config.ini' `
+        ((Resolve-LunarP2DataArea -EclipseHome $fakeEclipse) -eq $fakeArea)
+
+    # The post-condition that catches p2 exiting 0 without installing anything, which
+    # is what a rebuild at an unchanged Bundle-Version does.
+    Assert-Throws 'an install that landed nothing is not reported as success' {
+        Assert-LunarP2Installed -DataArea $fakeArea -Bundles $bundles
+    } 'the same version as one already in'
+    $fakePool = Join-Path $fakeArea 'pool\plugins'
+    New-Item -ItemType Directory -Path $fakePool -Force | Out-Null
+    foreach ($bundle in $bundles) {
+        New-Item -ItemType File -Path (Join-Path $fakePool ($bundle.id + '_' + $bundle.version + '.jar')) -Force | Out-Null
+    }
+    Assert-True 'an install with every bundle in the pool passes the post-condition' `
+        ($null -eq (Assert-LunarP2Installed -DataArea $fakeArea -Bundles $bundles))
+    # One stale version is enough: p2 installs the IU as a unit or not at all.
+    Remove-Item -LiteralPath (Join-Path $fakePool ($bundles[0].id + '_' + $bundles[0].version + '.jar')) -Force
+    Assert-Throws 'one bundle missing from the pool fails the post-condition' {
+        Assert-LunarP2Installed -DataArea $fakeArea -Bundles $bundles
+    } 'The director reported success'
+
+    Assert-Throws 'a missing eclipsec.exe names both manual routes' {
+        Get-LunarEclipseConsole -EclipseHome $fakeEclipse
+    } '-InstallP2'
+
+    # Every eclipsec.exe call has to go through Invoke-LunarEclipseApp, because that is
+    # what pins the working directory. A direct `& $console` added later would put the
+    # Eclipse product's own files back in the checkout, and nothing else here would
+    # notice. Cheap to assert, and it is the only thing that catches a fifth call site.
+    $directCalls = @(Select-String -LiteralPath (Join-Path $PSScriptRoot 'lunar-p2.ps1') `
+        -Pattern '&\s+\$console' -AllMatches)
+    Assert-True 'every eclipsec.exe invocation goes through Invoke-LunarEclipseApp' `
+        ($directCalls.Count -eq 0)
+    Assert-True 'Invoke-LunarEclipseApp is reached from publish, install and uninstall' `
+        ((@(Select-String -LiteralPath (Join-Path $PSScriptRoot 'lunar-p2.ps1') `
+            -Pattern 'Invoke-LunarEclipseApp -EclipseConsole' -AllMatches)).Count -ge 4)
+} finally {
+    Remove-Item -LiteralPath $p2Sandbox -Recurse -Force -ErrorAction SilentlyContinue
+}
 
 Write-Host ''
 if ($script:Failures -gt 0) {

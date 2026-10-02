@@ -130,6 +130,51 @@ Eclipse would overwrite bundles in an installation you did not mean to touch.
 '@
 }
 
+# One key out of configuration\config.ini, or $null if it is not stated there.
+function Get-LunarConfigIniValue {
+    param([Parameter(Mandatory = $true)][string]$EclipseHome, [Parameter(Mandatory = $true)][string]$Key)
+    $configIni = Join-Path $EclipseHome 'configuration\config.ini'
+    if (-not (Test-Path -LiteralPath $configIni)) { return $null }
+    $line = (Get-Content -LiteralPath $configIni -ErrorAction SilentlyContinue |
+        Where-Object { $_ -match ('^' + [regex]::Escape($Key) + '=') } | Select-Object -First 1)
+    if (-not $line) { return $null }
+    $line.Substring($line.IndexOf('=') + 1)
+}
+
+# A config.ini value that is a file: URI, as a Windows path.
+#
+# It is a java.util.Properties value, so ':' arrives escaped as '\:' -- unescaping the
+# colons first is required or the 'file:' prefix never matches, and dropping the
+# leading slash after that is equally required or the result is '\D:\...', which names
+# a non-existent drive and silently never resolves.
+#
+# Percent-escapes are decoded too, and not because they are rare: Equinox encodes
+# properly, so an installation under 'C:\Program Files' or any other path with a
+# space in it writes 'Program%20Files'. Left encoded, the path simply does not exist
+# and the pool looks undiscoverable on exactly the machines most likely to have it.
+function ConvertFrom-LunarIniUri {
+    param([Parameter(Mandatory = $true)][string]$Value)
+    $value = ($Value -replace '\\:', ':') -replace '^file:', ''
+    $value = $value -replace '^/', ''
+    [uri]::UnescapeDataString($value) -replace '/', '\'
+}
+
+# Where a p2 director run actually puts things: the area named by
+# eclipse.p2.data.area, whose layout is <area>\pool\plugins.
+#
+# Not the same thing as the pool the framework came from, and not derivable from
+# eclipseHome either -- a relocated pool puts the data area anywhere. Needed as a
+# post-condition for an install, because exit 0 from the director does not mean the
+# bundles landed.
+function Resolve-LunarP2DataArea {
+    param([string]$EclipseHome)
+    $value = Get-LunarConfigIniValue -EclipseHome $EclipseHome -Key 'eclipse.p2.data.area'
+    if ($value) { return (ConvertFrom-LunarIniUri -Value $value) }
+    # Unstated (a non-p2 install has no such key). <area>\pool\plugins is the only
+    # shape p2 uses, and the parent of the resolved pool is that area.
+    Split-Path -Parent (Resolve-LunarPoolDir -EclipseHome $EclipseHome)
+}
+
 # Derives the p2 pool from the installation.
 #
 # config.ini is the only source that states the pool outright: it names the exact
@@ -146,21 +191,10 @@ function Resolve-LunarPoolDir {
     $candidates = @()
 
     # config.ini: file:/D:/path/.p2/pool/plugins/org.eclipse.osgi_3.24.0.jar
-    $configIni = Join-Path $EclipseHome 'configuration\config.ini'
-    if (Test-Path -LiteralPath $configIni) {
-        $framework = (Get-Content -LiteralPath $configIni -ErrorAction SilentlyContinue |
-            Where-Object { $_ -match '^osgi\.framework=' } | Select-Object -First 1)
-        if ($framework) {
-            # A java.util.Properties value, so ':' arrives escaped as '\:' and the URI as
-            # 'file:/D:/...' -- note the slash BEFORE the drive letter. Unescaping the
-            # colons first is required, or the 'file:' prefix never matches; dropping
-            # the leading slash after that is equally required, or the result is
-            # '\D:\...' which names a non-existent drive and silently never resolves.
-            $jar = ($framework -replace '^osgi\.framework=', '')
-            $jar = ($jar -replace '\\:', ':') -replace '^file:', ''
-            $jar = ($jar -replace '^/', '') -replace '/', '\'
-            if ($jar) { $candidates += (Split-Path -Parent $jar) }
-        }
+    $framework = Get-LunarConfigIniValue -EclipseHome $EclipseHome -Key 'osgi.framework'
+    if ($framework) {
+        $jar = ConvertFrom-LunarIniUri -Value $framework
+        if ($jar) { $candidates += (Split-Path -Parent $jar) }
     }
 
     # eclipse.ini: -startup <relative path to a jar inside the pool>
@@ -255,4 +289,22 @@ function Resolve-LunarClasspath {
                "Point -PoolDir at the pool of the Eclipse you intend to build against.")
     }
     $resolved
+}
+
+# Refuses to install into an Eclipse that is up.
+#
+# Two independent reasons, and neither is a lock lunar could take instead:
+# Eclipse rewrites dropins/ while it runs, so a loose-jar install into a live
+# instance either fails or is discarded on the next start; and the p2 director has no
+# lock at all -- it checks only that the destination is writable, then writes
+# config.ini and the bundle pool under a framework that has already computed its
+# bundle cache. It will not refuse, so it must not be allowed to try.
+function Assert-LunarEclipseStopped {
+    param([Parameter(Mandatory = $true)][string]$EclipseHome)
+    $running = @(Get-Process eclipse, eclipsec -ErrorAction SilentlyContinue |
+        Where-Object { $_.Path -and $_.Path.StartsWith($EclipseHome + '\', [StringComparison]::OrdinalIgnoreCase) })
+    if ($running.Count -eq 0) { return }
+    throw ("Stop this Eclipse instance before installing Lunar:" + [Environment]::NewLine +
+           "  " + (($running | ForEach-Object { $_.Id }) -join ', ') + [Environment]::NewLine +
+           "Running: " + $EclipseHome)
 }
