@@ -396,8 +396,8 @@ To do the same by hand:
 #    Bundle-Version; category.xml is optional and only names the site in the wizard.
 mkdir site, plugins, features\com.github.lunar.feature
 copy out\<build>\com.github.lunar.*.jar plugins\
-#    features\com.github.lunar.feature\feature.xml   id="com.github.lunar.feature" version="0.0.1"
-#    category.xml                                    <site><feature id="com.github.lunar.feature" version="0.0.1"/>
+#    features\com.github.lunar.feature\feature.xml   id="com.github.lunar.feature" version="1.0.0"
+#    category.xml                                    <site><feature id="com.github.lunar.feature" version="1.0.0"/>
 
 # 2. Publish the bundles and feature. -source must be the directory holding
 #    plugins\ and features\, and eclipse.p2.data.area is where this run expects to

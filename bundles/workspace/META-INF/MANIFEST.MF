@@ -2,7 +2,7 @@ Manifest-Version: 1.0
 Bundle-ManifestVersion: 2
 Bundle-Name: LUNAR Workspace
 Bundle-SymbolicName: com.github.lunar.workspace;singleton:=true
-Bundle-Version: 0.0.1
+Bundle-Version: 1.0.0
 Bundle-Vendor: LUNAR
 Bundle-License: MIT
 Bundle-Copyright: Copyright (c) 2026 lunar contributors
