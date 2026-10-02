@@ -67,6 +67,10 @@ if ($LASTEXITCODE -ne 0) { throw 'Lunar compilation failed' }
 $sourceDir = Join-Path $lunarRoot 'src'
 $artifacts = @()
 $classFiles = @(Get-ChildItem -LiteralPath $classesDir -Filter '*.class' -Recurse)
+# The four check classes are run by this build and are deliberately not shipped, so the
+# coverage gate below has to be told about them. Named once, here, and the same list
+# decides what gets staged into the directory the checks are run from.
+$buildOnlyClasses = @('SelfCheck', 'FrameworkCheck', 'IntegrationCheck', 'ProtocolCheck')
 foreach ($bundle in @('core', 'workspace', 'run', 'debug', 'io')) {
     $stageDir = Join-Path $outputDir ('bundles\' + $bundle)
     New-Item -ItemType Directory -Path $stageDir -Force | Out-Null
@@ -77,7 +81,12 @@ foreach ($bundle in @('core', 'workspace', 'run', 'debug', 'io')) {
             'workspace' { $relative -like 'com\github\lunar\workspace\*' -or $relative -like 'com\github\lunar\verify\*' }
             'run' { $relative -like 'com\github\lunar\run\*' }
             'debug' { $relative -like 'com\github\lunar\debug\*' }
-            'io' { $relative -like 'com\github\lunar\io\McpHttpServer*.class' -or $relative -like 'com\github\lunar\LunarServer*.class' -or $relative -like 'com\github\lunar\EndpointFile*.class' }
+            # LunarConfig is here for the same reason LunarServer is: it is package-private
+            # in com.github.lunar and LunarServer reads it, so the two have to be in the
+            # same package in the same bundle. Core exports com.github.lunar.tools and
+            # com.github.lunar.io but not com.github.lunar, so moving it there would mean
+            # a split package that nothing exports.
+            'io' { $relative -like 'com\github\lunar\io\McpHttpServer*.class' -or $relative -like 'com\github\lunar\LunarServer*.class' -or $relative -like 'com\github\lunar\EndpointFile*.class' -or $relative -like 'com\github\lunar\LunarConfig*.class' }
         }
         if ($include) {
             $destination = Join-Path $stageDir $relative
@@ -99,7 +108,31 @@ foreach ($bundle in @('core', 'workspace', 'run', 'debug', 'io')) {
     if ($LASTEXITCODE -ne 0) { throw "Lunar $bundle packaging failed" }
     $artifacts += $artifact
 }
-$checkPath = $classesDir + ';' + $classPath
+# The gate that replaced silent dropping. Run against the jars that were just produced,
+# so what is checked is the artifact that ships and not the exploded directory it came
+# from. See Assert-LunarBundleCoverage for why these four are excluded.
+$coverage = Assert-LunarBundleCoverage -ClassesDir $classesDir -Jars $artifacts `
+    -BuildOnlyClasses $buildOnlyClasses
+Write-Output ("Lunar class coverage: " + $coverage)
+# The checks run against the packaged jars, not $classesDir. Running them against the
+# exploded directory is what let 133 checks pass over a build whose shipped artifact
+# could not load LunarConfig: every class resolved out of classes\, which still had the
+# class the jars were missing. Jars first, in dependency order (core first, io last).
+#
+# The exploded directory cannot be on this classpath at all -- it would satisfy anything
+# the jars are missing, which is the defect being guarded against. The check classes
+# themselves are not in any jar, so they get their own directory holding only them.
+$checksDir = Join-Path $outputDir 'checks'
+New-Item -ItemType Directory -Path $checksDir -Force | Out-Null
+foreach ($classFile in @(Get-ChildItem -LiteralPath $classesDir -Filter '*.class' -Recurse)) {
+    $relative = $classFile.FullName.Substring($classesDir.Length + 1)
+    $name = ($relative -split '\\')[-1] -replace '\$.*\.class$', '' -replace '\.class$', ''
+    if ($name -notin $buildOnlyClasses) { continue }
+    $destination = Join-Path $checksDir $relative
+    New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
+    Copy-Item -LiteralPath $classFile.FullName -Destination $destination
+}
+$checkPath = ((@($checksDir) + $artifacts) -join ';') + ';' + $classPath
 $ioArtifact = $artifacts | Where-Object { $_ -like '*com.github.lunar.io_*.jar' }
 & java -ea -cp $checkPath com.github.lunar.SelfCheck $ioArtifact
 if ($LASTEXITCODE -ne 0) { throw 'Lunar lifecycle check failed' }

@@ -39,6 +39,85 @@ function Get-LunarBundleIdentityList {
     $identities
 }
 
+# Every class file inside a jar, as paths relative to the jar root with '/' separators.
+#
+# System.IO.Compression rather than 'jar tf': this has to work when only the JRE is on
+# PATH, and the gate below runs inside check-env.ps1, which promises to stay offline and
+# cannot assume a JDK at all.
+function Get-LunarJarClassEntry {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    # Windows PowerShell 5.1 does not load this assembly by default, and the type is only
+    # resolved when the first statement runs, so the load has to be inside the function.
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($Path)
+    try {
+        @($zip.Entries | Where-Object { $_.FullName -like '*.class' } | ForEach-Object FullName)
+    } finally {
+        $zip.Dispose()
+    }
+}
+
+# The build's package step decides membership with pattern rules per bundle, and a class
+# that matches no rule is dropped without a word. That is how LunarConfig compiled,
+# reached no jar, and took the whole server down at class-load time with a
+# NoClassDefFoundError in the workspace log and nothing anywhere in the build output.
+#
+# So membership is now a hard gate rather than a convention: compare the compiled class
+# files against the class entries of the jars that were actually produced and refuse to
+# finish if the two sets disagree.
+#
+# $BuildOnlyClasses is the one legitimate exception. The four *Check classes are run by
+# the build from the classes directory and are deliberately not shipped -- packaging them
+# would put the whole check suite inside every bundle. They are listed by name here, so
+# the exception is visible in one place instead of implied by a rule that quietly matched
+# nothing, and a class that is neither shipped nor listed fails the build.
+function Assert-LunarBundleCoverage {
+    param(
+        [Parameter(Mandatory = $true)][string]$ClassesDir,
+        [Parameter(Mandatory = $true)][string[]]$Jars,
+        [string[]]$BuildOnlyClasses = @()
+    )
+    $compiled = @(Get-ChildItem -LiteralPath $ClassesDir -Filter '*.class' -Recurse |
+        ForEach-Object { $_.FullName.Substring($ClassesDir.Length + 1).Replace('\', '/') })
+    $shipped = @{}
+    foreach ($jar in $Jars) {
+        foreach ($entry in (Get-LunarJarClassEntry -Path $jar)) {
+            if (-not $shipped.ContainsKey($entry)) { $shipped[$entry] = @() }
+            $shipped[$entry] += (Split-Path -Leaf $jar)
+        }
+    }
+    # Matched on the top-level name, so an inner class of a listed check (SelfCheck$1)
+    # is covered by listing SelfCheck.
+    $buildOnlyNames = @($BuildOnlyClasses)
+    $missing = @($compiled | Where-Object {
+            $name = (($_ -split '/')[-1] -replace '\$.*$', '') -replace '\.class$', ''
+            $name -notin $buildOnlyNames -and -not $shipped.ContainsKey($_)
+        } | Sort-Object)
+    $duplicated = @($shipped.Keys | Where-Object { $shipped[$_].Count -gt 1 } | Sort-Object)
+    if ($missing.Count -eq 0 -and $duplicated.Count -eq 0) {
+        return "$($compiled.Count) classes, all in a jar except the declared build-only ones"
+    }
+    $report = @()
+    foreach ($class in $missing) {
+        $report += "  in no jar:    $class"
+    }
+    foreach ($class in $duplicated) {
+        $report += "  in $($shipped[$class].Count) jars: $class  ($($shipped[$class] -join ', '))"
+    }
+    throw @"
+The compiled classes and the packaged jars disagree. Packaging decides bundle
+membership by pattern, and a class matching no pattern is dropped silently --
+LunarConfig was dropped this way, and the server then failed at class-load time
+with a NoClassDefFoundError that no build step reported.
+
+$($report -join [Environment]::NewLine)
+
+Fix the membership rule in build.ps1 for the classes marked 'in no jar', or, if a
+class really is only for the build, add its name to BuildOnlyClasses in the
+Assert-LunarBundleCoverage call.
+"@
+}
+
 # A Windows path as the file: URI that p2 expects.
 #
 # The slash before the drive letter is required: 'file:/D:/path'. Handing the
