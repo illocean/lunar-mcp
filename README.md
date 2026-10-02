@@ -47,7 +47,13 @@ Codex, OpenCode, Claude Code, and any other MCP client, as long as it speaks str
    build.cmd
    ```
 
-   `build.cmd` delegates to `build.ps1`, which compiles every `.java` file under `src` with `javac --release 21` against pinned Eclipse jars from a p2 pool, packages five jars into a timestamped directory under `out`, then runs four check classes (`SelfCheck`, `ProtocolCheck`, `FrameworkCheck`, `IntegrationCheck`) and aborts if any fails. It records jar paths, sizes and SHA-256 hashes in `build-state.json`. Maven, Gradle, Ant and Tycho are not used.
+   `build.cmd` delegates to `build.ps1`, which locates your Eclipse and its p2 pool (see [Paths you have to change](#paths-you-have-to-change)), compiles every `.java` file under `src` with `javac --release 21`, packages five jars into a timestamped directory under `out`, then runs four check classes (`SelfCheck`, `ProtocolCheck`, `FrameworkCheck`, `IntegrationCheck`) and aborts if any fails. It records jar paths, sizes and SHA-256 hashes in `build-state.json`. Maven, Gradle, Ant and Tycho are not used.
+
+   The check script has no Eclipse dependency of its own and is worth running if you change `lunar-env.ps1`. It also asserts that the minimum versions in `build.ps1` still match the ones the bundle manifests declare, so the two cannot drift apart:
+
+   ```powershell
+   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\check-env.ps1
+   ```
 
 3. Install. Stop Eclipse first, then:
 
@@ -74,21 +80,42 @@ Codex, OpenCode, Claude Code, and any other MCP client, as long as it speaks str
 
    Startup errors land in `<workspace>\.metadata\.log`.
 
-### Paths you have to change
+### Finding your Eclipse
 
-The build is pinned to one machine's layout. On any other machine, edit these three locations before the first build:
+The build finds Eclipse itself. Nothing has to be edited.
 
-| File and line | Value | Meaning |
+| What | How it is found | Override |
 | --- | --- | --- |
-| `build.ps1:4` | `D:\EclipseIDE\.p2\pool\plugins` | directory holding the pinned Eclipse jars the build compiles against |
-| `build.ps1:96` | `D:\EclipseIDE\eclipse\` | Eclipse installation whose running processes block an install |
-| `build.ps1:98` | `D:\EclipseIDE\eclipse\dropins` | dropins folder the jars are copied into |
+| Eclipse installation | `eclipse.exe` on `PATH`, when exactly one is there | `-EclipseHome <dir>`, or `LUNAR_ECLIPSE_HOME` |
+| p2 pool | `configuration/config.ini`'s `osgi.framework` entry, then `<eclipse home>/plugins`, then a sibling `.p2\pool\plugins` | `-PoolDir <dir>`, or `LUNAR_POOL_DIR` |
+| dropins folder | `<eclipse home>\dropins`, created if absent | derived from `-EclipseHome` |
 
-The jar file names in `build.ps1` are pinned to one Eclipse release train too. If your installation ships other bundle versions, the script fails with `Missing pinned jar: <name>`; update the list to match your pool.
+If Eclipse is not on `PATH` — the usual case, because Eclipse does not install itself there — the build stops and tells you to set one variable once:
+
+```powershell
+[Environment]::SetEnvironmentVariable('LUNAR_ECLIPSE_HOME', 'C:\path\to\eclipse', 'User')
+```
+
+After that `build.cmd` works with no arguments. The pool is derived from that installation, so `LUNAR_POOL_DIR` is only needed for an unusual or relocated pool.
+
+Two Eclipse installations on `PATH` is an error rather than a choice: lunar refuses rather than risk installing into the one you did not mean.
+
+The classpath is resolved by bundle id and minimum version, not by exact file name, so a pool from any recent Eclipse release works. A bundle that is absent, or older than its minimum, is reported by name with the version found:
+
+```text
+Missing or too-old bundles in C:\path\to\.p2\pool\plugins:
+  org.eclipse.jdt.core (found 3.30.0, need >= 3.44.0)
+```
+
+To bypass discovery entirely, pass both explicitly:
+
+```powershell
+.\build.ps1 -EclipseHome 'C:\path\to\eclipse' -PoolDir 'C:\path\to\.p2\pool\plugins'
+```
 
 ### Configuration
 
-The token is the only setting you have to change. Everything else has a working default, and each has an environment variable that overrides it:
+The token is the only setting you have to change. Everything else has a working default, and each has an environment variable that overrides it. These are read by the running server:
 
 | Variable | Default | Notes |
 | --- | --- | --- |

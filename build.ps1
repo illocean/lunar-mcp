@@ -1,44 +1,57 @@
-param([switch]$Install, [switch]$NoInstall)
+param(
+    [switch]$Install,
+    [switch]$NoInstall,
+    # Both default to discovery; see lunar-env.ps1 for the full resolution order.
+    [string]$EclipseHome,
+    [string]$PoolDir
+)
 $ErrorActionPreference = 'Stop'
 $lunarRoot = $PSScriptRoot
-$poolDir = 'D:\EclipseIDE\.p2\pool\plugins'
-$jarNames = @(
-    'org.eclipse.osgi_3.24.0.v20251126-0427.jar',
-    'org.eclipse.core.runtime_3.34.100.v20251111-1421.jar',
-    'org.eclipse.equinox.common_3.20.300.v20251111-0312.jar',
-    'org.eclipse.core.jobs_3.15.700.v20250725-1147.jar',
-    'org.eclipse.core.resources_3.23.100.v20251106-1705.jar',
-    'org.eclipse.equinox.registry_3.12.600.v20250906-0651.jar',
-    'org.eclipse.osgi.services_3.11.200.v20231106-0901.jar',
-    'org.apache.felix.scr_2.2.18.jar',
-    'org.osgi.service.component_1.5.1.202212101352.jar',
-    'org.eclipse.jdt.core_3.44.0.v20251118-1842.jar',
-    'org.eclipse.jdt.core.compiler.batch_3.44.0.v20251118-1623.jar',
-    'org.eclipse.debug.core_3.23.200.v20251107-0507.jar',
-    'org.eclipse.debug.ui_3.19.100.v20251114-0802.jar',
-    'org.eclipse.jdt.launching_3.24.0.v20251031-2243.jar',
-    'org.eclipse.jdt.debug_3.25.0.v20251031-2243\jdimodel.jar',
-    'org.eclipse.jdt.junit_3.17.300.v20251107-1918.jar',
-    'org.eclipse.jdt.junit.core_3.14.0.v20251201-1407.jar',
-    'org.eclipse.core.filebuffers_3.8.500.v20251103-0746.jar',
-    'org.eclipse.text_3.14.500.v20251103-0730.jar',
-    'org.eclipse.jface.text_3.29.0.v20251112-0859.jar',
-    'org.eclipse.jface_3.38.100.v20251108-1551.jar',
-    'org.eclipse.ui_3.207.400.v20251015-1301.jar',
-    'org.eclipse.ui.workbench_3.137.0.v20251114-0005.jar',
-    'org.eclipse.ui.console_3.15.0.v20251113-1013.jar',
-    'org.eclipse.swt_3.132.0.v20251124-0642.jar',
-    'org.eclipse.swt.win32.win32.x86_64_3.132.0.v20251124-0642.jar',
-    'org.eclipse.equinox.app_1.7.500.v20250629-0337.jar',
-    'org.eclipse.core.expressions_3.9.500.v20250608-0434.jar',
-    'org.eclipse.equinox.preferences_3.12.100.v20251111-0704.jar',
-    'org.osgi.service.prefs_1.1.2.202109301733.jar'
+. (Join-Path $lunarRoot 'lunar-env.ps1')
+
+# Compile-time classpath. Only the bundles lunar actually Require-Bundle carry a
+# minimum version, and those match the versions declared in the manifests -- a
+# manifest that names a floor the build does not honour is a broken install, and
+# check-env.ps1 asserts the two agree. The remaining entries are compile-only
+# dependencies (OSGi annotations, Equinox internals) that no manifest names, so
+# they carry no floor: a minimum there would be an undocumented hard failure for
+# anyone on an older release train, buying nothing, because the build uses these
+# only as a classpath and never reads their version.
+$compileBundles = @(
+    'org.eclipse.osgi@3.24.0',
+    'org.eclipse.core.runtime@3.34.0',
+    'org.eclipse.core.resources@3.23.0',
+    'org.eclipse.jdt.core@3.44.0',
+    'org.eclipse.core.filebuffers@3.8.0',
+    'org.eclipse.text@3.14.0',
+    'org.eclipse.equinox.app@1.7.0',
+    'org.eclipse.jdt.launching@3.24.0',
+    'org.eclipse.debug.core@3.23.0',
+    'org.eclipse.jdt.junit.core@3.14.0',
+    'org.eclipse.debug.ui@3.19.0',
+    'org.eclipse.swt@3.132.0',
+    'org.eclipse.jdt.debug@3.25.0',
+    'org.eclipse.ui.console@3.15.0',
+    'org.eclipse.ui.workbench@3.137.0',
+    'org.eclipse.equinox.common',
+    'org.eclipse.core.jobs',
+    'org.eclipse.equinox.registry',
+    'org.eclipse.osgi.services',
+    'org.apache.felix.scr',
+    'org.osgi.service.component',
+    'org.eclipse.jdt.core.compiler.batch',
+    'org.eclipse.jdt.junit',
+    'org.eclipse.jface.text',
+    'org.eclipse.jface',
+    'org.eclipse.ui',
+    'org.eclipse.swt.win32.win32.x86_64',
+    'org.eclipse.core.expressions',
+    'org.eclipse.equinox.preferences',
+    'org.osgi.service.prefs'
 )
-$compileJars = foreach ($jarName in $jarNames) {
-    $jarFile = Join-Path $poolDir $jarName
-    if (-not (Test-Path -LiteralPath $jarFile)) { throw "Missing pinned jar: $jarName" }
-    $jarFile
-}
+$eclipseHomePath = Resolve-LunarEclipseHome -Explicit $EclipseHome
+$poolDir = Resolve-LunarPoolDir -EclipseHome $eclipseHomePath -Explicit $PoolDir
+$compileJars = Resolve-LunarClasspath -PoolDir $poolDir -Requirements $compileBundles
 $classPath = $compileJars -join ';'
 # Keep previous artifacts for rollback; builds never recursively delete a directory.
 $outputDir = Join-Path $lunarRoot ('out\' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff'))
@@ -92,10 +105,15 @@ if ($LASTEXITCODE -ne 0) { throw 'Lunar domain integration check failed' }
 if ($Install -and $NoInstall) { throw 'Choose -Install or -NoInstall, not both' }
 $backupDir = $null
 if ($Install) {
+    # Eclipse rewrites dropins/ while it is running, so an install into a live
+    # instance either fails or is silently discarded on the next start.
     $running = @(Get-Process eclipse,eclipsec -ErrorAction SilentlyContinue |
-        Where-Object { $_.Path -and $_.Path.StartsWith('D:\EclipseIDE\eclipse\', [StringComparison]::OrdinalIgnoreCase) })
+        Where-Object { $_.Path -and $_.Path.StartsWith($eclipseHomePath + '\', [StringComparison]::OrdinalIgnoreCase) })
     if ($running.Count) { throw 'Stop this Eclipse instance before installing Lunar bundles' }
-    $dropinsDir = 'D:\EclipseIDE\eclipse\dropins'
+    $dropinsDir = Join-Path $eclipseHomePath 'dropins'
+    if (-not (Test-Path -LiteralPath $dropinsDir)) {
+        New-Item -ItemType Directory -Path $dropinsDir -Force | Out-Null
+    }
     $backupDir = Join-Path $lunarRoot ('backup\installed-' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff'))
     New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
     foreach ($old in @(Get-ChildItem -LiteralPath $dropinsDir -Filter 'com.github.lunar.*_*.jar')) {
