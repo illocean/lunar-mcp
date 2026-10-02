@@ -764,9 +764,14 @@ try {
     # The stub above is a reimplementation, so nothing else here would notice the real
     # signature drifting back to [string] -- and a [string] $Value is what turns the $null
     # that means "delete this variable" into an empty string on its way in.
+    #
+    # Bounded at the next "function ", because a lazy match with no bound reaches straight
+    # past this function into Test-LunarConfigValue, which has the identical parameter list
+    # -- so the assertion passed against a signature it was written to catch. Verified by
+    # reverting this signature and watching it stay green.
     Assert-True 'Set-LunarUserEnvironment passes a null $Value through untyped' `
         ((Get-Content -LiteralPath (Join-Path $PSScriptRoot 'lunar.ps1') -Raw) `
-            -match '(?s)function Set-LunarUserEnvironment.*?param\(\[string\]\$Name, \$Value\)')
+            -match '(?s)function Set-LunarUserEnvironment(?:(?!function ).)*?param\(\[string\]\$Name, \$Value\)')
 } finally {
     Remove-Item -LiteralPath $sandboxProfile -Recurse -Force -ErrorAction SilentlyContinue
     $env:USERPROFILE = $realUserProfile
