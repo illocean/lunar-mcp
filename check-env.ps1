@@ -277,6 +277,80 @@ Assert-True 'no bundle carries a floor that no manifest declares' `
         $_ -notlike 'com.github.lunar.*' -and -not $manifestFloors.ContainsKey($_)
       }).Count -eq 0)
 
+Write-Host 'lunar ranges resolve against the versions the build ships'
+# The floor check above skips com.github.lunar.* and reads only the lower bound, so it
+# reported agreement over a set that could not resolve: every satellite required core in
+# [0.0.1,0.1.0) while core shipped as 1.0.0. Assert-LunarBundleVersionRange reads the
+# full range and tests it against the version inside the built jar.
+#
+# The version comes from the jars, not from the manifests and not from a constant. If a
+# jar was built from a different manifest than the one on disk, this compares the range
+# against what actually ships, and a version in this file cannot be edited into
+# agreement with itself.
+$jarVersions = @{}
+$artifacts = @()
+$buildStatePath = Join-Path $PSScriptRoot 'build-state.json'
+if (Test-Path -LiteralPath $buildStatePath -PathType Leaf) {
+    $artifacts = @((Get-Content -LiteralPath $buildStatePath -Raw | ConvertFrom-Json).artifacts |
+        Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) })
+}
+Assert-True 'the last build produced jars this check can read versions from' `
+    ($artifacts.Count -eq 5)
+foreach ($jar in $artifacts) {
+    # The jar is named after its Bundle-SymbolicName, which is what the ranges name.
+    $id = (Split-Path -Leaf $jar) -replace '_[0-9][0-9.]*\.jar$', ''
+    $jarVersions[$id] = Get-LunarJarVersion -Path $jar
+}
+Assert-True 'the jars in the last build all report 1.0.0' `
+    (@($jarVersions.Values | Where-Object { $_ -ne '1.0.0' }).Count -eq 0)
+Assert-LunarBundleVersionRange -LunarRoot $PSScriptRoot -Versions $jarVersions
+Assert-True 'the real manifests pass the range check' $true
+
+# The gate has to fail when it should. A temp copy of the manifests with one range
+# closed below the shipped version, which is exactly the defect that shipped 0.0.1-era
+# jars with four unresolvable satellites.
+$rangeSandbox = Join-Path ([System.IO.Path]::GetTempPath()) ('lunar-range-' + [Guid]::NewGuid().ToString('n'))
+try {
+    # Into <sandbox>\bundles, because the assertion takes a LunarRoot and looks for
+    # bundles\core, bundles\io and so on under it. Copying to the sandbox root itself
+    # would leave it rejecting every bundle for being absent, and the refusal below
+    # would be proving the wrong thing.
+    $sandboxBundles = Join-Path $rangeSandbox 'bundles'
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'bundles') -Destination $sandboxBundles -Recurse
+    $ioManifest = Join-Path $sandboxBundles 'io\META-INF\MANIFEST.MF'
+    $ioText = [System.IO.File]::ReadAllText($ioManifest)
+    $ioText = $ioText.Replace('com.github.lunar.core;bundle-version="[1.0.0,2.0.0)',
+        'com.github.lunar.core;bundle-version="[0.0.1,0.1.0)')
+    [System.IO.File]::WriteAllText($ioManifest, $ioText, (New-Object System.Text.UTF8Encoding($false)))
+    $threw = ''
+    try { Assert-LunarBundleVersionRange -LunarRoot $rangeSandbox -Versions $jarVersions }
+    catch { $threw = $_.Exception.Message }
+    Assert-True 'a range that excludes the shipped version is refused' ($threw -ne '')
+    Assert-True 'the refusal names the bundle that declares the broken range' ($threw -match '\bio\b')
+    Assert-True 'the refusal names the range it found' ($threw -match '\[0\.0\.1,0\.1\.0\)')
+    Assert-True 'the refusal names the version that falls outside it' ($threw -match '1\.0\.0')
+} finally {
+    Remove-Item -LiteralPath $rangeSandbox -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# Range semantics, because the check above only exercises one shape of range. Each case
+# is a form OSGi accepts and a wrong bracket turns into a silent pass or a false alarm.
+foreach ($case in @(
+        @{ r = '[1.0.0,2.0.0)'; v = '1.0.0'; want = $true;  why = 'the floor is inclusive' },
+        @{ r = '[1.0.0,2.0.0)'; v = '1.9.9'; want = $true;  why = 'inside the range' },
+        @{ r = '[1.0.0,2.0.0)'; v = '2.0.0'; want = $false; why = 'the ceiling is exclusive' },
+        @{ r = '[1.0.0,2.0.0]'; v = '2.0.0'; want = $true;  why = 'a closed ceiling includes it' },
+        @{ r = '(1.0.0,2.0.0)'; v = '1.0.0'; want = $false; why = 'an open floor excludes it' },
+        @{ r = '(1.0.0,2.0.0)'; v = '1.5.0'; want = $true;  why = 'an open range still has a middle' },
+        @{ r = '1.0.0'; v = '1.0.0'; want = $true;        why = 'a bare version matches itself' },
+        @{ r = '1.0.0'; v = '1.0.1'; want = $false;       why = 'a bare version is exact, not a floor' },
+        @{ r = '[1.0.0,)'; v = '1.0.0'; want = $true;       why = 'an absent ceiling means no ceiling' },
+        @{ r = '1.0.10'; v = '1.0.9'; want = $false;       why = 'micro is compared numerically, not as text' },
+        @{ r = '[1.0.0,2.0.0)'; v = '1.0.0.20260101'; want = $true; why = 'a qualifier is dropped, not rejected' })) {
+    Assert-True "$($case.v) in $($case.r): $($case.why)" `
+        ((Test-LunarVersionInRange -Range $case.r -Version $case.v) -eq $case.want)
+}
+
 Write-Host 'lunar-p2: identity, feature.xml and category.xml'
 $bundles = Get-LunarBundleIdentityList -LunarRoot $PSScriptRoot
 Assert-True 'five bundles are found' ($bundles.Count -eq 5)

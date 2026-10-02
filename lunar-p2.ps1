@@ -39,6 +39,148 @@ function Get-LunarBundleIdentityList {
     $identities
 }
 
+# The manifest inside a built jar, unfolded. Used to read the version a jar really
+# carries rather than the version the manifest on disk claims, so a jar that was
+# built from a different manifest cannot pass a range check.
+function Get-LunarJarVersion {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($Path)
+    try {
+        $entry = $zip.GetEntry('META-INF/MANIFEST.MF')
+        if (-not $entry) { throw "No manifest inside $Path" }
+        $reader = New-Object System.IO.StreamReader($entry.Open())
+        try { $text = $reader.ReadToEnd() } finally { $reader.Dispose() }
+    } finally {
+        $zip.Dispose()
+    }
+    $text = $text -replace "\r?\n ", ''
+    if ($text -notmatch 'Bundle-Version:\s*([^\r\n]+)') { throw "No Bundle-Version inside $Path" }
+    $Matches[1].Trim()
+}
+
+# True when $Version satisfies an OSGi/p2 version range.
+#
+# Handles all four forms a range can take: '[1.0.0,2.0.0)' inclusive-exclusive,
+# '(1.0.0,2.0.0]' exclusive-inclusive, '[1.0.0,2.0.0]' and the open '(1.0.0,2.0.0)',
+# plus the bare '1.0.0' that means exactly that version. Compare-LunarVersion does the
+# ordering; this only reads the bounds and their inclusivity.
+function Test-LunarVersionInRange {
+    param([Parameter(Mandatory = $true)][string]$Range, [Parameter(Mandatory = $true)][string]$Version)
+    $range = $Range.Trim()
+    # Not named $version: PowerShell variables are case insensitive, so $version would
+    # be the [string]$Version parameter and the assignment would coerce the parsed
+    # object straight back to a string. Compare-LunarVersion would then read $null for
+    # every segment and report every version as less than every bound.
+    $parsed = ConvertTo-LunarVersion $Version
+    if ($range -notmatch '^[\[(]') {
+        # A bare version is an exact match, not a floor. Compared through
+        # Compare-LunarVersion, not -eq: these are pscustomobjects and -eq on two of
+        # them is a reference comparison, which is false for two equal values.
+        $exact = ConvertTo-LunarVersion $range
+        if (-not $exact) { throw "Cannot read version range: $Range" }
+        return (Compare-LunarVersion $parsed $exact) -eq 0
+    }
+    if ($range -notmatch '^([\[(])\s*([^\],]*)\s*,\s*([^\]\[]*)\s*([\])])$') {
+        throw "Cannot read version range: $Range"
+    }
+    $lowClosed = $Matches[1] -eq '['
+    $low = $Matches[2]
+    $high = $Matches[3]
+    $highClosed = $Matches[4] -eq ']'
+    if ($low) {
+        $bound = ConvertTo-LunarVersion $low
+        $order = Compare-LunarVersion $parsed $bound
+        if ($order -lt 0 -or ($order -eq 0 -and -not $lowClosed)) { return $false }
+    }
+    if ($high) {
+        $bound = ConvertTo-LunarVersion $high
+        $order = Compare-LunarVersion $parsed $bound
+        if ($order -gt 0 -or ($order -eq 0 -and -not $highClosed)) { return $false }
+    }
+    $true
+}
+
+# Every version range a manifest declares, as @{ header; target; range }, for the
+# three headers that can name a version.
+#
+# Require-Bundle and Fragment-Host name a bundle, so the target has a Bundle-Version.
+# Import-Package names a package, whose version comes from the exporting bundle's
+# Export-Package entry and is optional there. Entries without a range are skipped:
+# an unversioned dependency is not a range that can exclude anything.
+function Get-LunarManifestRange {
+    param([Parameter(Mandatory = $true)][string]$ManifestDir)
+    $text = (Get-Content -LiteralPath (Join-Path $ManifestDir 'META-INF\MANIFEST.MF') -Raw) -replace "\r?\n ", ''
+    $ranges = @()
+    foreach ($header in @(@('Require-Bundle', 'bundle-version'), @('Fragment-Host', 'bundle-version'), @('Import-Package', 'version'))) {
+        if ($text -notmatch "(?m)^$($header[0]):\s*(.+)$") { continue }
+        $value = $Matches[1]
+        # Split on commas that are outside quotes: a range is '[1.0.0,2.0.0)' and
+        # contains the separator, so a bare -split ',' cuts every range in half.
+        $depth = 0
+        $entry = ''
+        $entries = @()
+        foreach ($char in $value.ToCharArray()) {
+            if ($char -eq '"') { $depth = 1 - $depth }
+            if ($char -eq ',' -and $depth -eq 0) { $entries += $entry; $entry = ''; continue }
+            $entry += $char
+        }
+        $entries += $entry
+        foreach ($one in $entries) {
+            $pattern = '(?<id>[^,;"]+)[;,]?\s*' + [regex]::Escape($header[1]) + '="(?<range>[^"]+)"'
+            if ($one -notmatch $pattern) { continue }
+            $id = $Matches['id'].Trim()
+            # Only the project is checked. A range on an Eclipse bundle is a floor on a
+            # dependency the pool owns, and check-env.ps1 already compares those against
+            # build.ps1.
+            if ($id -notlike 'com.github.lunar.*') { continue }
+            $ranges += @{ header = $header[0]; target = $id; range = $Matches['range'].Trim() }
+        }
+    }
+    $ranges
+}
+
+# Refuses a build whose lunar bundles do not resolve against each other.
+#
+# The defect this exists for: every satellite required com.github.lunar.core in
+# [0.0.1,0.1.0) while core shipped as 1.0.0, so 1.0.0 fell outside the range that named
+# it and OSGi resolved none of the four. The old floor check read only the lower bound
+# and skipped com.github.lunar.* entirely, so it reported agreement over a set that could
+# not resolve.
+#
+# $Versions maps a bundle id to the version to test against, read from the built jars by
+# the caller, so this compares ranges against what was actually produced rather than
+# against a constant that can be edited to agree with itself.
+function Assert-LunarBundleVersionRange {
+    param(
+        [Parameter(Mandatory = $true)][string]$LunarRoot,
+        [Parameter(Mandatory = $true)][hashtable]$Versions
+    )
+    $broken = @()
+    foreach ($bundle in @('core', 'workspace', 'run', 'debug', 'io')) {
+        $bundleDir = Join-Path $LunarRoot ('bundles\' + $bundle)
+        foreach ($entry in (Get-LunarManifestRange -ManifestDir $bundleDir)) {
+            if (-not $Versions.ContainsKey($entry.target)) {
+                $broken += "  $bundle $($entry.header) $($entry.target): no version known for the target, so the range cannot be checked"
+                continue
+            }
+            if (-not (Test-LunarVersionInRange -Range $entry.range -Version $Versions[$entry.target])) {
+                $broken += "  $bundle $($entry.header) $($entry.target);$($entry.header.ToLower())=`"$($entry.range)`" excludes $($Versions[$entry.target])"
+            }
+        }
+    }
+    if ($broken.Count -eq 0) { return }
+    throw @"
+A lunar bundle requires a version its own build does not provide.
+
+$($broken -join [Environment]::NewLine)
+
+The version above is read out of the built jar. A range that excludes it means OSGi
+will not resolve the bundle that declares it, so nothing it contributes ever activates,
+and nothing in the build output says so.
+"@
+}
+
 # Every class file inside a jar, as paths relative to the jar root with '/' separators.
 #
 # System.IO.Compression rather than 'jar tf': this has to work when only the JRE is on
