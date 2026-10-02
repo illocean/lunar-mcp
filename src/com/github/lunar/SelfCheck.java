@@ -183,6 +183,91 @@ public final class SelfCheck {
     }
 
     /**
+     * The config file, read and resolved without touching the real one or the real
+     * environment. Every assertion here states both inputs explicitly, so it means the same
+     * thing on a machine that has {@code ECLIPSE_MCP_TOKEN} exported as on one that does not.
+     */
+    private static void checkConfigFile() {
+        Path dir = null;
+        try {
+            dir = Files.createTempDirectory("lunar-config");
+            Path file = dir.resolve("config.json");
+
+            // An absent file is the normal case for anyone who set the variables by hand, and it
+            // must produce the documented defaults rather than an exception.
+            LunarConfig empty = LunarConfig.fromFile(LunarConfig.read(file), null, null, null);
+            yes("an absent config file leaves the defaults in place",
+                    empty.host().equals(LunarServer.DEFAULT_HOST) && empty.port() == 8124);
+            yes("an absent config file yields no token, so the server refuses to bind",
+                    empty.token() == null);
+
+            Files.writeString(file, "{\"token\":\"file-token\",\"host\":\"localhost\",\"port\":9001}");
+            LunarConfig fromFile =
+                    LunarConfig.fromFile(LunarConfig.read(file), null, null, null);
+            yes("the config file supplies the token", "file-token".equals(fromFile.token()));
+            yes("the config file supplies the host", "localhost".equals(fromFile.host()));
+            yes("the config file supplies the port", fromFile.port() == 9001);
+
+            // The whole point of the file being a fallback rather than a second source of truth.
+            LunarConfig envWins =
+                    LunarConfig.fromFile(LunarConfig.read(file), "env-token", "10.0.0.1", "7000");
+            yes("the environment token wins over the file", "env-token".equals(envWins.token()));
+            yes("the environment host wins over the file", "10.0.0.1".equals(envWins.host()));
+            yes("the environment port wins over the file", envWins.port() == 7000);
+
+            // A blank variable is not a setting. Treating it as one would let a variable that
+            // was cleared in one shell and inherited by the next silently shadow the file.
+            LunarConfig blankEnv =
+                    LunarConfig.fromFile(LunarConfig.read(file), "  ", "  ", "  ");
+            yes("a blank environment token falls through to the file",
+                    "file-token".equals(blankEnv.token()));
+            yes("a blank environment host falls through to the file",
+                    "localhost".equals(blankEnv.host()));
+            yes("a blank environment port falls through to the file", blankEnv.port() == 9001);
+
+            // A file that cannot be parsed must not be the reason the endpoint is missing.
+            for (String bad : new String[] {"{", "not json at all", "[1,2,3]", "\"a string\"", ""}) {
+                Files.writeString(file, bad);
+                LunarConfig recovered = LunarConfig.fromFile(LunarConfig.read(file), null, null, null);
+                yes("an unparseable config file falls back to the defaults",
+                        recovered.port() == 8124 && recovered.host().equals(LunarServer.DEFAULT_HOST)
+                                && recovered.token() == null);
+            }
+
+            // A port may be typed either way, and both have to work, because both are things a
+            // person writes into this file by hand.
+            Files.writeString(file, "{\"port\":\"9100\"}");
+            yes("a port written as a string is accepted",
+                    LunarConfig.fromFile(LunarConfig.read(file), null, null, null).port() == 9100);
+            for (String badPort : new String[] {"{\"port\":0}", "{\"port\":70000}", "{\"port\":\"x\"}",
+                    "{\"port\":null}", "{\"port\":{}}"}) {
+                Files.writeString(file, badPort);
+                yes("an unusable port in the file falls back: " + badPort,
+                        LunarConfig.fromFile(LunarConfig.read(file), null, null, null).port() == 8124);
+            }
+
+            // A blank token is not a usable token: falling through to "no token" makes the
+            // server refuse to bind, which is the safe outcome. Serving unauthenticated is not.
+            Files.writeString(file, "{\"token\":\"   \"}");
+            yes("a blank token in the file is not a token",
+                    LunarConfig.fromFile(LunarConfig.read(file), null, null, null).token() == null);
+
+            // The values never reach the log, whatever happens.
+            Files.writeString(file, "{\"token\":\"super-secret-value\",\"port\":9001}");
+            String described = LunarConfig.fromFile(LunarConfig.read(file), null, null, null)
+                    .describe();
+            yes("describe names the source of each value",
+                    described.contains("config file") && described.contains("9001"));
+            yes("describe never contains the token itself",
+                    !described.contains("super-secret-value"));
+        } catch (IOException e) {
+            fail("the config file self-check ran", e.toString());
+        } finally {
+            deleteTree(dir);
+        }
+    }
+
+    /**
      * The endpoint address is configurable, so the defaults the README documents must stay exactly
      * 127.0.0.1 and 8124, and the loopback guard must actually refuse a routable address. Both are
      * asserted here because a silent change to either breaks every published client URL, and because
@@ -209,6 +294,11 @@ public final class SelfCheck {
         yes("port 0 falls back", LunarServer.portFrom("0") == 8124);
         yes("port above 65535 falls back", LunarServer.portFrom("70000") == 8124);
         yes("negative port falls back", LunarServer.portFrom("-1") == 8124);
+        yes("isUsablePort accepts a real port", LunarServer.isUsablePort("8124"));
+        yes("isUsablePort rejects the text it would discard",
+                !LunarServer.isUsablePort("eighty") && !LunarServer.isUsablePort("0")
+                        && !LunarServer.isUsablePort("70000") && !LunarServer.isUsablePort("-1"));
+        checkConfigFile();
         // The guard itself: a routable bind address must be refused before any listener exists.
         // If the guard ever regresses, the listener it accepted would stay open for the life of
         // this JVM on every interface, so the reference is held and stopped either way.

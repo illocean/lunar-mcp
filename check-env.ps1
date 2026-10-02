@@ -110,6 +110,10 @@ try {
 }
 
 Write-Host 'Resolve-LunarEclipseHome'
+# Cleared for the discovery cases below, and put back in the finally: a developer's own
+# LUNAR_ECLIPSE_HOME is what makes those cases meaningful, and a suite that silently
+# removed it would break the very next build.ps1 run on this machine.
+$realEclipseHome = $env:LUNAR_ECLIPSE_HOME
 $env:LUNAR_ECLIPSE_HOME = $null
 Assert-True 'an explicit path is taken as given' `
     ((Resolve-LunarEclipseHome -Explicit $PSScriptRoot) -eq (Resolve-Path -LiteralPath $PSScriptRoot).Path)
@@ -153,6 +157,7 @@ if (@(Get-Command eclipse.exe, eclipsec.exe -ErrorAction SilentlyContinue).Count
 } else {
     Write-Host '  skip Eclipse is on PATH here, so the not-found branch cannot be reached'
 }
+$env:LUNAR_ECLIPSE_HOME = $realEclipseHome
 
 Write-Host 'Resolve-LunarPoolDir / Get-LunarProfileName'
 # A synthetic install reproducing the layout that broke the first version of this
@@ -429,6 +434,342 @@ try {
             -Pattern 'Invoke-LunarEclipseApp -EclipseConsole' -AllMatches)).Count -ge 4)
 } finally {
     Remove-Item -LiteralPath $p2Sandbox -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# ---------------------------------------------------------------------------
+# lunar.ps1 -- the config file, the endpoint URL, the four subcommands, and the
+# ordering of the uninstall guard.
+#
+# Run against a temporary USERPROFILE, because the real one holds the token a running
+# Eclipse is using. Everything here is offline: no registry writes, no Eclipse, no
+# client CLI.
+# ---------------------------------------------------------------------------
+
+$sandboxProfile = Join-Path ([System.IO.Path]::GetTempPath()) `
+    ('lunar-userprofile-' + [Guid]::NewGuid().ToString('N').Substring(0, 8))
+$realUserProfile = $env:USERPROFILE
+try {
+    $env:USERPROFILE = $sandboxProfile
+    # Dot-sourced for its functions. The switch at the bottom does not run, so nothing here
+    # touches the registry or a real Eclipse.
+    . (Join-Path $PSScriptRoot 'lunar.ps1')
+
+    # The two environment accessors, replaced for the duration of this block.
+    #
+    # Set-* is replaced because the subcommands are the only thing that writes the token to
+    # the user environment, so a test of them that really called it would be a test nobody
+    # could afford to run -- it would overwrite the token the developer's Eclipse is
+    # answering with. Get-* is replaced for the same reason in the other direction: read
+    # live, and on any machine with a token exported every assertion below about "adopt the
+    # live token" would quietly be an assertion about the developer's own machine.
+    $script:fakeEnvironment = @{}
+    $script:environmentWrites = New-Object System.Collections.ArrayList
+    function Get-LunarUserEnvironment {
+        param([string]$Name)
+        if ($script:fakeEnvironment.ContainsKey($Name)) { return $script:fakeEnvironment[$Name] }
+        return $null
+    }
+    function Set-LunarUserEnvironment {
+        # Same untyped $Value as the real one, so what is recorded is what the caller
+        # actually passed -- a null is what deletes a variable, an empty string does not.
+        param([string]$Name, $Value)
+        [void]$script:environmentWrites.Add(@{ Name = $Name; Value = $Value })
+        $script:fakeEnvironment[$Name] = $Value
+    }
+
+    # The subcommands report through Write-Host, which reaches the information stream, so
+    # what they say is only readable through 6>&1. It is worth asserting on: "setup adopts
+    # the token" is a claim about a message as much as about a file, and the messages are
+    # the part a person actually sees.
+    function Get-LunarConsoleText {
+        param([scriptblock]$Action)
+        ((& $Action 6>&1) | ForEach-Object { [string]$_ }) -join "`n"
+    }
+
+    $configPath = Get-LunarConfigPath
+    Assert-True 'the config file lands under the user profile' `
+        ($configPath -eq (Join-Path (Join-Path $sandboxProfile '.lunar') 'config.json'))
+    Assert-True 'an absent config file reads as absent, not as an error' `
+        ($null -eq (Read-LunarConfig))
+
+    # The URL has to match the one the Java side builds, byte for byte, because this is
+    # what a client is told to connect to. A disagreement shows up as a 404 at the client
+    # and nothing anywhere else.
+    $full = [pscustomobject]@{ token = 't'; host = 'localhost'; port = 9001 }
+    Assert-True 'the endpoint URL matches the server default' `
+        ((Get-LunarEndpointUrl -Config ([pscustomobject]@{ token = 't' })) -eq 'http://127.0.0.1:8124/mcp')
+    Assert-True 'host and port from the file reach the URL' `
+        ((Get-LunarEndpointUrl -Config $full) -eq 'http://localhost:9001/mcp')
+    Assert-True 'a port from the config file reaches the URL' `
+        ((Get-LunarEndpointUrl -Config ([pscustomobject]@{ token = 't'; port = 1234 })) `
+            -eq 'http://127.0.0.1:1234/mcp')
+    # An IPv6 literal has to be bracketed, or the port separator is indistinguishable
+    # from the address and the client parses a nonsense port.
+    Assert-True 'an IPv6 host is bracketed in the URL' `
+        ((Get-LunarEndpointUrl -Config ([pscustomobject]@{ token = 't'; host = '::1' })) `
+            -eq 'http://[::1]:8124/mcp')
+
+    # Half-written files. The Java side falls back to defaults, so the script has to read
+    # them the same way, or setup would print one URL and the server would bind another.
+    Assert-True 'a missing host falls back to the server default' `
+        ((Get-LunarSetting -Config ([pscustomobject]@{ port = 9001 }) -Name 'host' -Default '127.0.0.1') `
+            -eq '127.0.0.1')
+    Assert-True 'a blank host falls back to the server default' `
+        ((Get-LunarSetting -Config ([pscustomobject]@{ host = '  ' }) -Name 'host' -Default '127.0.0.1') `
+            -eq '127.0.0.1')
+    Assert-True 'a present host is used' `
+        ((Get-LunarSetting -Config ([pscustomobject]@{ host = 'localhost' }) -Name 'host' -Default 'x') `
+            -eq 'localhost')
+
+    # Round trip. A config file the script writes and the script cannot read back is a
+    # file that has to be hand-edited, which is the opposite of the point of it.
+    $roundTrip = [pscustomobject]@{ token = 'abc123'; host = '127.0.0.1'; port = 8124 }
+    Write-LunarConfig -Config $roundTrip | Out-Null
+    $reread = Read-LunarConfig
+    Assert-True 'a written config file reads back identically' `
+        ($reread.token -eq 'abc123' -and $reread.port -eq 8124)
+    # UTF-8 without a BOM: ConvertFrom-Json on a BOM-prefixed file under Windows PowerShell
+    # throws, and so does the Java reader.
+    $bytes = [System.IO.File]::ReadAllBytes($configPath)
+    Assert-True 'the config file is written without a byte order mark' `
+        (-not ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF))
+    Assert-Throws 'a malformed config file is reported, not silently ignored' {
+        Set-Content -LiteralPath $configPath -Value 'not json' -NoNewline
+        Read-LunarConfig | Out-Null
+    } 'not valid JSON'
+    # Valid JSON is not a usable config. ConvertFrom-Json accepts these happily, every
+    # property lookup on the result misses, and setup would then report success and leave
+    # behind a file the server cannot read -- so it refuses to bind and the user is told
+    # nothing until they go looking. Refusing here is the only place that can catch it.
+    foreach ($notAnObject in @('[1,2,3]', '"hello"', '42', 'true', 'null')) {
+        Assert-Throws ('a config file holding ' + $notAnObject + ' is refused, not half-used') {
+            Set-Content -LiteralPath $configPath -Value $notAnObject -NoNewline
+            Read-LunarConfig | Out-Null
+        } 'not an object'
+    }
+
+    $tokenA = New-LunarToken
+    $tokenB = New-LunarToken
+    Assert-True 'the token generator produces something long enough to be a token' `
+        ($tokenA.Length -ge 32)
+    Assert-True 'two generated tokens differ' ($tokenA -ne $tokenB)
+
+    Write-Host 'Invoke-LunarSetup'
+    # From nothing: the state a stranger is in who has just cloned the repository. The file
+    # goes first, because the assertions above deliberately left unusable ones behind.
+    Remove-Item -LiteralPath $configPath -Force -ErrorAction SilentlyContinue
+    $script:fakeEnvironment = @{}
+    $script:environmentWrites.Clear()
+    $out = Get-LunarConsoleText { Invoke-LunarSetup }
+    $setup = Read-LunarConfig
+    Assert-True 'setup on a bare machine writes a config file' ($null -ne $setup)
+    Assert-True 'setup writes a token long enough to be one' ($setup.token.Length -ge 32)
+    Assert-True 'setup fills in the same defaults the server uses' `
+        ($setup.host -eq '127.0.0.1' -and $setup.port -eq 8124)
+    Assert-True 'setup publishes the token to the user environment' `
+        ($script:fakeEnvironment['ECLIPSE_MCP_TOKEN'] -eq $setup.token)
+    Assert-True 'setup never prints the token it just wrote' `
+        (-not ($out -match [regex]::Escape($setup.token)))
+    Assert-True 'setup says to restart Eclipse, because the token just changed' `
+        ($out -match 'Restart Eclipse')
+
+    # The failure this second run guards against is silent. A rotated token leaves a running
+    # Eclipse holding the old value in memory while every client reads the new one, so all of
+    # them get 401 until somebody restarts Eclipse -- and nothing anywhere says why.
+    $first = $setup.token
+    $script:environmentWrites.Clear()
+    $out = Get-LunarConsoleText { Invoke-LunarSetup }
+    Assert-True 'a second setup does not rotate the token' ((Read-LunarConfig).token -eq $first)
+    Assert-True 'a second setup does not rewrite an unchanged variable' `
+        ($script:environmentWrites.Count -eq 0)
+    Assert-True 'a second setup says no restart is needed' ($out -match 'needs no restart')
+
+    # The README tells people to hand-write a config file, so a partial one with no token in
+    # it is the likeliest way setup meets an existing install.
+    $script:fakeEnvironment = @{ ECLIPSE_MCP_TOKEN = 'a-token-already-in-use' }
+    $script:environmentWrites.Clear()
+    Set-Content -LiteralPath $configPath -Value '{"host":"127.0.0.1","port":8124}' -NoNewline
+    Get-LunarConsoleText { Invoke-LunarSetup } | Out-Null
+    Assert-True 'setup adopts a live token rather than cutting a new one' `
+        ((Read-LunarConfig).token -eq 'a-token-already-in-use')
+    Assert-True 'adopting a live token leaves the variable alone' `
+        ($script:environmentWrites.Count -eq 0)
+
+    # A config file the server cannot read is the round trip the phase exists to hold, and
+    # the shape that breaks it is not an unusable type but a type the script happens to
+    # accept. Read as "complete" before this was fixed, {"token":42,"host":123,"port":true}
+    # published a one-character bearer token to the user environment and handed the client
+    # http://123:True/mcp -- while LunarConfig.java rejected all three. So: setup rewrites
+    # what the server would refuse, and reports the server's own defaults for the rest.
+    $script:fakeEnvironment = @{}
+    $script:environmentWrites.Clear()
+    Set-Content -LiteralPath $configPath `
+        -Value '{"token":42,"host":123,"port":true}' -NoNewline
+    $out = Get-LunarConsoleText { Invoke-LunarSetup }
+    $rewritten = Read-LunarConfig
+    Assert-True 'setup replaces a numeric token with a generated one' `
+        ($rewritten.token -is [string] -and $rewritten.token.Length -ge 32)
+    Assert-True 'setup replaces a numeric host with the server default' `
+        ($rewritten.host -eq '127.0.0.1')
+    Assert-True 'setup replaces a boolean port with the server default' `
+        ($rewritten.port -eq 8124)
+    Assert-True 'setup publishes a real token, not the number it found' `
+        ($script:fakeEnvironment['ECLIPSE_MCP_TOKEN'] -eq $rewritten.token)
+    Assert-True 'the rewritten endpoint is the one the server binds' `
+        ($out -match 'http://127\.0\.0\.1:8124/mcp')
+    Assert-True 'no bogus host or port reaches the printed endpoint' `
+        (-not ($out -match '123|True'))
+
+    # The same file, one key at a time. A port that is a string but not a number is the one
+    # that used to reach status as a [int] cast and kill the whole report.
+    Set-Content -LiteralPath $configPath -Value '{"port":"abc"}' -NoNewline
+    Assert-True 'an unparseable port falls back to the server default' `
+        ((Get-LunarSetting -Config (Read-LunarConfig) -Name 'port' -Default 8124) -eq 8124)
+    Get-LunarConsoleText { Invoke-LunarSetup } | Out-Null
+    Assert-True 'setup rewrites an unparseable port' ((Read-LunarConfig).port -eq 8124)
+    # Both spellings the server accepts have to survive setup, or it repairs working files.
+    Set-Content -LiteralPath $configPath -Value '{"token":"keepme","port":"9100"}' -NoNewline
+    $script:fakeEnvironment = @{}
+    $script:environmentWrites.Clear()
+    Get-LunarConsoleText { Invoke-LunarSetup } | Out-Null
+    Assert-True 'a port written as a number string is left alone' `
+        ((Read-LunarConfig).port -eq '9100')
+    Set-Content -LiteralPath $configPath -Value '{"port":9200}' -NoNewline
+    $script:fakeEnvironment = @{}
+    Get-LunarConsoleText { Invoke-LunarSetup } | Out-Null
+    Assert-True 'a port written as a number is left alone' ((Read-LunarConfig).port -eq 9200)
+    Set-Content -LiteralPath $configPath -Value '{"token":"   ","port":9200}' -NoNewline
+    $script:fakeEnvironment = @{}
+    Get-LunarConsoleText { Invoke-LunarSetup } | Out-Null
+    $repaired = Read-LunarConfig
+    Assert-True 'a blank token is repaired rather than kept' ($repaired.token.Length -ge 32)
+    Assert-True 'repairing one key leaves the readable ones alone' ($repaired.port -eq 9200)
+
+    Write-Host 'Invoke-LunarConnect'
+    Write-LunarConfig -Config ([pscustomobject]@{ token = 'a-token-worth-not-printing'
+        host = '127.0.0.1'; port = 8124 }) | Out-Null
+    # Only the codex branch. opencode is on PATH for anyone running this suite, and the
+    # opencode branch really does run `opencode mcp add`, which would write a registration
+    # into whichever project the terminal happened to be sitting in.
+    $Client = 'codex'
+    $out = Get-LunarConsoleText { Invoke-LunarConnect }
+    Assert-True 'codex is handed a snippet naming the environment variable' `
+        ($out -match 'bearer_token_env_var = "ECLIPSE_MCP_TOKEN"')
+    Assert-True 'the codex snippet carries the resolved URL' `
+        ($out -match 'http://127\.0\.0\.1:8124/mcp')
+    Assert-True 'no client snippet carries the token' `
+        (-not ($out -match 'a-token-worth-not-printing'))
+    $Client = 'nonesuch'
+    Assert-Throws 'an unknown client is named in the error' `
+        { Invoke-LunarConnect 6>&1 | Out-Null } "Unknown client 'nonesuch'"
+    $Client = 'opencode'
+
+    # Everything from here down touches Eclipse, so the resolver is replaced first: a real
+    # one finds the developer's own installation, and the suite would then read -- or worse,
+    # delete from -- a live Eclipse while claiming to be offline. The port probe is replaced
+    # for the same reason: it opens a real socket, and "not answering" is as true on a
+    # developer's machine with Eclipse running as it is on one without.
+    function Resolve-LunarEclipseHome { throw 'no Eclipse in this test' }
+    function Test-LunarPortAnswering { return $false }
+
+    Write-Host 'Invoke-LunarStatus'
+    # A config file with no token in it is what a hand-written file becomes once only host
+    # and port were filled in. $null.Length is 0, so a status that measures the token reports
+    # "0 characters" -- which is what a broken install looks like, and is not one.
+    $script:fakeEnvironment = @{}
+    Write-LunarConfig -Config ([pscustomobject]@{ host = '127.0.0.1'; port = 8124 }) | Out-Null
+    $out = Get-LunarConsoleText { Invoke-LunarStatus }
+    Assert-True 'status says the token is unset rather than measuring nothing' `
+        ($out -match 'UNSET')
+    Assert-True 'status never reports a zero-length token' (-not ($out -match '0 characters'))
+    Assert-True 'status never claims the port is answering' (-not ($out -cmatch 'ANSWERING'))
+    # status used to cast the port itself, so a config file holding a non-numeric port killed
+    # the whole report after it had already printed a URL. The default has to reach both.
+    Set-Content -LiteralPath $configPath -Value '{"token":"t","host":"127.0.0.1","port":"abc"}' -NoNewline
+    $out = Get-LunarConsoleText { Invoke-LunarStatus }
+    Assert-True 'status survives a non-numeric port in the file' ($out -match 'port 8124')
+    Assert-True 'status quotes one endpoint, and it is the one the server binds' `
+        (([regex]::Matches($out, 'http://[^ ]+/mcp').Count -eq 1) `
+            -and ($out -notmatch 'http://127\.0\.0\.1:abc'))
+    Write-LunarConfig -Config ([pscustomobject]@{ token = 'a-token-worth-not-printing'
+        host = '127.0.0.1'; port = 8124 }) | Out-Null
+    Assert-True 'status never prints the token' `
+        (-not ((Get-LunarConsoleText { Invoke-LunarStatus }) -match 'a-token-worth-not-printing'))
+
+    Write-Host 'Invoke-LunarUninstall'
+    Write-LunarConfig -Config ([pscustomobject]@{ token = 'the-last-token'
+        host = '127.0.0.1'; port = 8124 }) | Out-Null
+    $out = Get-LunarConsoleText { Invoke-LunarUninstall }
+    Assert-True 'uninstall without -Force keeps the config file' (Test-Path -LiteralPath $configPath)
+    Assert-True 'uninstall without -Force names what it left behind' `
+        ($out -match 'Re-run with -Force')
+
+    $script:environmentWrites.Clear()
+    $Force = $true
+    $out = Get-LunarConsoleText { Invoke-LunarUninstall }
+    $Force = $false
+    Assert-True 'uninstall -Force moves the config file aside rather than deleting it' `
+        (Test-Path -LiteralPath ($configPath + '.bak'))
+    Assert-True 'uninstall -Force removes the config file' (-not (Test-Path -LiteralPath $configPath))
+    Assert-True 'uninstall -Force clears the token variable' `
+        ((@($script:environmentWrites | Where-Object {
+            $_.Name -eq 'ECLIPSE_MCP_TOKEN' -and $null -eq $_.Value })).Count -ge 1)
+    Assert-True 'the backup still holds the token, so nothing is lost' `
+        ((Get-Content -LiteralPath ($configPath + '.bak') -Raw) -match 'the-last-token')
+
+    # The p2 half, which the blocks above never reach because the resolver throws first. A
+    # failed removal has to stop before the settings go: the settings have to outlive the
+    # bundles, or a server that is still installed answers 401 to the person undoing it.
+    # Reachable offline by replacing the resolver, the console lookup and the p2 run.
+    Write-Host 'Invoke-LunarUninstall, p2 removal fails'
+    function Resolve-LunarEclipseHome { return $fakeEclipseHome }
+    function Get-LunarEclipseConsole { return (Join-Path $fakeEclipseHome 'eclipsec.exe') }
+    function Invoke-LunarEclipseApp { return 1 }
+    # site\ is what uninstall looks for, and it only exists once someone has run -InstallP2,
+    # so this creates it if absent and takes it away again -- but only if it was not there.
+    $siteDir = Join-Path $PSScriptRoot 'site'
+    $madeSite = -not (Test-Path -LiteralPath $siteDir)
+    if ($madeSite) { New-Item -ItemType Directory -Path $siteDir -Force | Out-Null }
+    $fakeEclipseHome = Join-Path $sandboxProfile 'fake-eclipse'
+    New-Item -ItemType Directory -Path (Join-Path $fakeEclipseHome 'dropins') -Force | Out-Null
+    New-Item -ItemType File -Path (Join-Path $fakeEclipseHome 'dropins\com.github.lunar.core_0.0.1.jar') `
+        -Force | Out-Null
+    try {
+        Write-LunarConfig -Config ([pscustomobject]@{ token = 'still-the-live-one'
+            host = '127.0.0.1'; port = 8124 }) | Out-Null
+        $Force = $true
+        Assert-Throws 'a failed p2 removal stops uninstall' `
+            { Invoke-LunarUninstall 6>&1 | Out-Null } 'failed'
+        Assert-True 'a failed p2 removal leaves the settings in place' `
+            (Test-Path -LiteralPath $configPath)
+        Assert-True 'a failed p2 removal says the bundles are still installed' `
+            ((Get-Content -LiteralPath $configPath -Raw) -match 'still-the-live-one')
+    } finally {
+        $Force = $false
+        if ($madeSite) { Remove-Item -LiteralPath $siteDir -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    # The ordering this script is safe because of, which no offline test can reach: removing
+    # the bundles happens after the guard, and a live Eclipse is the only thing that can
+    # prove it. So this one is asserted on the source -- which call comes first in the file
+    # is the whole claim.
+    $uninstall = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'lunar.ps1') -Raw
+    $guardAt = $uninstall.IndexOf("Assert-LunarEclipseStopped -EclipseHome `$eclipseHome -What 'removing Lunar'")
+    $removeAt = $uninstall.IndexOf('Remove-Item -LiteralPath $jar.FullName')
+    Assert-True 'uninstall checks for a running Eclipse before deleting anything' `
+        ($guardAt -gt 0 -and $removeAt -gt $guardAt)
+    Assert-True 'the guard names removing, not installing' `
+        ($uninstall -match "-What 'removing Lunar'")
+
+    # The stub above is a reimplementation, so nothing else here would notice the real
+    # signature drifting back to [string] -- and a [string] $Value is what turns the $null
+    # that means "delete this variable" into an empty string on its way in.
+    Assert-True 'Set-LunarUserEnvironment passes a null $Value through untyped' `
+        ((Get-Content -LiteralPath (Join-Path $PSScriptRoot 'lunar.ps1') -Raw) `
+            -match '(?s)function Set-LunarUserEnvironment.*?param\(\[string\]\$Name, \$Value\)')
+} finally {
+    Remove-Item -LiteralPath $sandboxProfile -Recurse -Force -ErrorAction SilentlyContinue
+    $env:USERPROFILE = $realUserProfile
 }
 
 Write-Host ''

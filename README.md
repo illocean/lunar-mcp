@@ -29,9 +29,25 @@ Codex, OpenCode, Claude Code, and any other MCP client, as long as it speaks str
 - **Windows.** The build pins `org.eclipse.swt.win32.win32.x86_64`, and the scripts are PowerShell.
 - **JDK 21** on `PATH`. Every bundle declares `Bundle-RequiredExecutionEnvironment: JavaSE-21`.
 - **Eclipse 2025-11 (4.38).** The bundles require `org.eclipse.core.runtime` 3.34+, `org.eclipse.core.resources` 3.23+, `org.eclipse.jdt.core` 3.44+, `org.eclipse.jdt.debug` 3.25+, `org.eclipse.debug.core` 3.23+, `org.eclipse.jdt.launching` 3.24+ and `org.eclipse.jdt.junit.core` 3.14+.
-- **A bearer token** in the `ECLIPSE_MCP_TOKEN` environment variable, set before Eclipse starts. The server refuses to bind when the variable is missing or blank, and requires the token on every request including from `127.0.0.1`. A request without it gets HTTP 401.
+- **A bearer token**, in `ECLIPSE_MCP_TOKEN` or as the `token` key in `%USERPROFILE%\.lunar\config.json`, present before Eclipse starts. The server refuses to bind when neither carries one, and requires the token on every request including from `127.0.0.1`. A request without it gets HTTP 401.
 
 ## Install and setup
+
+### The quick path
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\lunar.ps1 setup
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -Install
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\lunar.ps1 connect
+```
+
+Then start Eclipse with `-clean -consoleLog` and check with `.\lunar.ps1 status`, which reports the resolved settings, whether the token variable and the config file agree, where lunar is installed, and whether the port is answering.
+
+`setup` writes `%USERPROFILE%\.lunar\config.json`, generates a token if you do not already have one, and copies it to the user-scope `ECLIPSE_MCP_TOKEN` so clients can expand it. `connect` registers the endpoint with your client. Both print the commands they ran, so nothing they do is invisible — and [Doing it by hand](#doing-it-by-hand) below is the same thing written out one step at a time, for when you would rather not run a script at all.
+
+### Doing it by hand
+
+Every step below is the manual equivalent of what the scripts do. None of it requires the scripts.
 
 1. Set the token in the environment Eclipse will inherit, then restart any running Eclipse:
 
@@ -39,7 +55,30 @@ Codex, OpenCode, Claude Code, and any other MCP client, as long as it speaks str
    [Environment]::SetEnvironmentVariable('ECLIPSE_MCP_TOKEN', '<a long random string>', 'User')
    ```
 
+   A token is any unguessable string. One way to make one without typing it:
+
+   ```powershell
+   $bytes = New-Object byte[] 32
+   [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+   $token = -join ($bytes | ForEach-Object { $_.ToString('x2') })
+   [Environment]::SetEnvironmentVariable('ECLIPSE_MCP_TOKEN', $token, 'User')
+   ```
+
    Open a new terminal afterwards. A terminal that was already running keeps the old environment, and a client started from it sends an unexpanded `${ECLIPSE_MCP_TOKEN}` that lunar rejects with 401.
+
+   To keep the token in a file instead, create the directory and the file by hand — the server reads `%USERPROFILE%\.lunar\config.json`, and the environment still wins if both are set:
+
+   ```powershell
+   New-Item -ItemType Directory -Path "$env:USERPROFILE\.lunar" -Force | Out-Null
+   ```
+
+   ```json
+   {
+     "token": "<a long random string>",
+     "host": "127.0.0.1",
+     "port": 8124
+   }
+   ```
 
 2. Build. From the repository root, with JDK 21 on `PATH`:
 
@@ -117,17 +156,29 @@ To bypass discovery entirely, pass both explicitly:
 
 ### Configuration
 
-The token is the only setting you have to change. Everything else has a working default, and each has an environment variable that overrides it. These are read by the running server:
+Three settings: a token, a host and a port. Each has an environment variable and a key in `%USERPROFILE%\.lunar\config.json`, read in that order — **the environment wins**, because it is per-process and lets two Eclipse installations on one machine differ without either editing a shared file. A variable set to a blank value counts as unset and falls through to the file, so a variable cleared in one shell does not silently shadow it.
 
-| Variable | Default | Notes |
-| --- | --- | --- |
-| `ECLIPSE_MCP_TOKEN` | none, required | Bearer token for every request. A blank value makes the server refuse to bind. |
-| `LUNAR_MCP_HOST` | `127.0.0.1` | Must resolve to a loopback address. A routable address is refused, because lunar drives a local IDE workspace. |
-| `LUNAR_MCP_PORT` | `8124` | Anything that is not a port in 1-65535 is ignored with a warning in the Error Log, and the default is used. |
+| Variable | Config key | Default | Notes |
+| --- | --- | --- | --- |
+| `ECLIPSE_MCP_TOKEN` | `token` | none, required | Bearer token for every request. A blank value makes the server refuse to bind. |
+| `LUNAR_MCP_HOST` | `host` | `127.0.0.1` | Must resolve to a loopback address. A routable address is refused, because lunar drives a local IDE workspace. |
+| `LUNAR_MCP_PORT` | `port` | `8124` | Anything that is not a port in 1-65535 is ignored with a warning in the Error Log, and the default is used. A port may be written as a number or as a quoted string in the file. |
 
-Set them at user scope, like the token, and restart Eclipse. The server resolves them once at startup, so a value changed while Eclipse is running has no effect until it restarts. If the port is already taken, the server fails loudly and prints both the port and the variable to change; it does not silently pick a different one.
+`lunar.ps1 setup` keeps the file and the variable in step, and `lunar.ps1 status` tells you when they have drifted apart. Nothing else rewrites either one; the server only ever reads the file.
+
+The server resolves all three once at startup, so a change has no effect until Eclipse restarts. If the port is already taken, the server fails loudly and prints both the port and the variable to change; it does not silently pick a different one.
+
+A config file that cannot be parsed — or that is valid JSON but not an object, such as a bare array — is reported in the Error Log and the defaults are used, so a typo is never the reason the endpoint is missing. A missing file is normal for anyone who set the variables by hand.
 
 ## Connect your client
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\lunar.ps1 connect
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\lunar.ps1 connect -Client codex
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\lunar.ps1 connect -Global
+```
+
+`connect` uses the client's own `add` command when it has one, so you end up with an entry the client wrote itself rather than a file lunar edited — which matters, because a JSON file lunar merges into by hand is a JSON file lunar can corrupt. It falls back to printing the snippet when there is no command to run, and the sections below are those snippets. Nothing here needs the script.
 
 The endpoint is `http://127.0.0.1:8124/mcp`, the advertised MCP protocol version is `2025-06-18`, and the client must send `Authorization: Bearer <value of ECLIPSE_MCP_TOKEN>` on every request.
 
@@ -171,7 +222,13 @@ Add to `opencode.json` in your project:
 
 OpenCode V2 nests servers under `mcp.servers`. V1 placed them directly under `mcp`; if your client is on V1, move the `lunar` object up one level.
 
-`opencode mcp add lunar --url http://127.0.0.1:8124/mcp --header "Authorization=Bearer {env:ECLIPSE_MCP_TOKEN}"` writes the entry to the project config for you. Add `--global` to write to `~/.config/opencode/opencode.json` instead; omit it to keep lunar project-scoped.
+`lunar.ps1 connect` runs exactly that command. Run it by hand from the project you want lunar in:
+
+```bash
+opencode mcp add lunar --url http://127.0.0.1:8124/mcp --header "Authorization=Bearer {env:ECLIPSE_MCP_TOKEN}"
+```
+
+Add `--global` to write to `~/.config/opencode/opencode.json` instead; omit it to keep lunar project-scoped, which is the default because a shared repository should not decide what its contributors' agents can reach.
 
 Project config is loaded by traversing up from the working directory to the nearest Git directory, and it overrides the global config for keys they both set.
 Source: <https://opencode.ai/v2/docs/mcp-servers/> and <https://opencode.ai/docs/config/>
@@ -295,6 +352,29 @@ Expect HTTP 200 and a JSON-RPC result listing 18 tools. Drop the `Authorization`
 | `get_delta` | Compare a retained baseline with a fresh read | `baselineId` |
 | `batch` | Run up to 16 loaded tools sequentially, stopping on the first failure | `calls` |
 
+## Removing it
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\lunar.ps1 uninstall
+```
+
+That removes the lunar bundles from `dropins` and uninstalls the p2 feature if it was installed that way. It refuses to touch anything while an Eclipse from that installation is running, because deleting a jar from under a live Eclipse leaves the one state nobody wants: lunar still answering in the running instance and gone from disk for the next one. Stop Eclipse first.
+
+Without `-Force` the config file and `ECLIPSE_MCP_TOKEN` are left alone, so `status` still works afterwards. With `-Force` they go too — the config file is renamed to `config.json.bak` rather than deleted, because the token inside it is the one thing here that cannot be handed back to whatever client was using it.
+
+By hand: delete `com.github.lunar.*.jar` from `<eclipse>\dropins`, and if lunar came from the update site, run the director's own uninstall:
+
+```powershell
+.\eclipse\eclipsec.exe -nosplash -consoleLog -application org.eclipse.equinox.p2.director -repository file:/D:/path/to/lunar/site -destination D:\path\to\eclipse -profile <profile> -uninstallIU com.github.lunar.feature.feature.group
+```
+
+p2 leaves the files on disk at uninstall by design, so check the pool before and after. `uninstall` leaves the client registration alone as well, because it cannot know which client you used and in which scope — remove that too with your client's own command (`opencode mcp remove lunar`, or delete the `lunar` entry from the file under [Connect your client](#connect-your-client)). To remove the settings as well:
+
+```powershell
+[Environment]::SetEnvironmentVariable('ECLIPSE_MCP_TOKEN', $null, 'User')
+Remove-Item "$env:USERPROFILE\.lunar\config.json"
+```
+
 ## Installing from the update site
 
 `-Install` copies loose jars into `dropins`. That is the simplest thing that works and it needs no p2 at all. If you would rather have lunar managed as an installed feature, `build.ps1 -InstallP2` publishes a repository into `site\` and installs it with the p2 director.
@@ -364,6 +444,7 @@ Two things worth knowing before you choose this route:
 - `-InstallP2` publishes a p2 update site; there is still no Tycho build. The default `-Install` route produces jars and puts them in `dropins`.
 - The publisher boots the full Eclipse product named in `eclipse.ini`, so bundles already in `dropins` are activated during the run. With lunar there, one harmless `LUNAR MCP endpoint failed to start` is logged, because a headless product has no workspace yet. The publish itself is unaffected.
 - Tools act on saved files on disk, not on unsaved editor buffers. Mutating calls reject dirty text and JDT buffers rather than overwrite them.
+- Every client sees the same catalog. Eighteen tools are visible from the start; the rest become visible when a session calls `load_toolset`, and no client name or version is special-cased to change that — a client that caches its tool list has to re-read it after a load.
 - Writes are guarded: `write_file`, `move_file`, `delete_file`, `apply_edit` and `apply_quick_fix` all require the current `read_file` hash as `expectedHash`.
 - `get_problems` reads markers that already exist and triggers no build. Call `build_project` for current diagnostics, and read its marker counts: `built=true` does not mean there were no errors.
 - `run_tests` needs an existing native JUnit launch configuration and does not create one. A completed run with failing tests can return `ok=true` and `passed=false`: the tool succeeded at running the tests.
@@ -376,7 +457,9 @@ Two things worth knowing before you choose this route:
 
 ## Contributing
 
-Run `build.ps1` before you open a pull request. It fails on any compile error or any of its four check classes.
+Run `build.ps1` before you open a pull request. It fails on any compile error or any of its four check classes. Run `check-env.ps1` too if you touched a script — it needs no Eclipse and asserts the things that only fail once someone else runs the build.
+
+`lunar.ps1` covers the whole setup and teardown surface so there is one entry point, and it is loadable without running: `check-env.ps1` dot-sources it and runs all four subcommands against a temporary user profile with the environment accessors replaced, so no test writes to the registry or to your real `%USERPROFILE%\.lunar`.
 
 ## License
 

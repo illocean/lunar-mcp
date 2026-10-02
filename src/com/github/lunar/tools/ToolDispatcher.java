@@ -49,10 +49,6 @@ public final class ToolDispatcher {
     }
 
 
-    public static void exposeAllTools(String session) {
-        sessionFor(session).loaded.add("all");
-    }
-
     public static String createSession() {
         synchronized (SESSIONS) {
             if (SESSIONS.size() >= 64) {

@@ -300,11 +300,14 @@ function Resolve-LunarClasspath {
 # config.ini and the bundle pool under a framework that has already computed its
 # bundle cache. It will not refuse, so it must not be allowed to try.
 function Assert-LunarEclipseStopped {
-    param([Parameter(Mandatory = $true)][string]$EclipseHome)
+    param([Parameter(Mandatory = $true)][string]$EclipseHome, [string]$What = 'installing Lunar')
     $running = @(Get-Process eclipse, eclipsec -ErrorAction SilentlyContinue |
         Where-Object { $_.Path -and $_.Path.StartsWith($EclipseHome + '\', [StringComparison]::OrdinalIgnoreCase) })
     if ($running.Count -eq 0) { return }
-    throw ("Stop this Eclipse instance before installing Lunar:" + [Environment]::NewLine +
+    # Names the operation, because the same guard covers installing and uninstalling and
+    # "stop Eclipse before installing Lunar" is the wrong instruction when somebody is
+    # halfway through taking it back off.
+    throw ("Stop this Eclipse instance before " + $What + ":" + [Environment]::NewLine +
            "  " + (($running | ForEach-Object { $_.Id }) -join ', ') + [Environment]::NewLine +
            "Running: " + $EclipseHome)
 }

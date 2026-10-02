@@ -32,10 +32,6 @@ public class LunarServer {
     public static final String CONTEXT_PATH = "/mcp";
     public static final String DEFAULT_HOST = "127.0.0.1";
 
-    private static final String TOKEN_ENV = "ECLIPSE_MCP_TOKEN";
-    private static final String HOST_ENV = "LUNAR_MCP_HOST";
-    private static final String PORT_ENV = "LUNAR_MCP_PORT";
-
     private McpHttpServer server;
     private EndpointFile endpoint;
     private boolean listenerStarted;
@@ -48,14 +44,17 @@ public class LunarServer {
      * logged reason below still names the cause.
      */
     public LunarServer() {
-        String host = host();
-        int port = port();
-        String token = System.getenv(TOKEN_ENV);
-        if (token == null || token.isBlank()) {
+        LunarConfig config = LunarConfig.resolve();
+        String host = config.host();
+        int port = config.port();
+        String token = config.token();
+        if (token == null) {
             // Refuse to bind rather than serve unauthenticated. A blank token is not a usable token.
-            String reason = TOKEN_ENV + " is unset or blank; refusing to bind "
+            String reason = LunarConfig.TOKEN_ENV + " is unset and no token is in the lunar config file"
+                    + " (" + LunarConfig.defaultPath() + "); refusing to bind "
                     + EndpointFile.url(host, port, CONTEXT_PATH)
-                    + ". Set the user-scope environment variable and restart Eclipse.";
+                    + ". Run lunar.ps1 setup, set the user-scope environment variable, and restart"
+                    + " Eclipse.";
             log(IStatus.ERROR, reason, null);
             throw new IllegalStateException(reason);
         }
@@ -69,7 +68,7 @@ public class LunarServer {
             // Length only. The value never reaches the log.
             log(IStatus.INFO, "LUNAR MCP endpoint listening on "
                     + EndpointFile.url(host, port, CONTEXT_PATH) + " -> " + endpoint.path()
-                    + " (token length " + token.length() + ")", null);
+                    + " (" + config.describe() + ")", null);
         } catch (Exception e) {
             // A bind failure used to surface only in .metadata/.log, so Eclipse started normally and
             // lunar was silently absent. Name the cause and the way out in the console too.
@@ -80,11 +79,11 @@ public class LunarServer {
                 // must not assert "in use" -- that would send the user hunting a process that is not
                 // the problem.
                 hint = " Could not bind port " + port + ": already in use, or not permitted to bind."
-                        + " Stop whatever holds it, or set " + PORT_ENV + " to a free port and restart"
-                        + " Eclipse.";
+                        + " Stop whatever holds it, or set " + LunarConfig.PORT_ENV
+                        + " to a free port and restart Eclipse.";
             } else if (e instanceof java.net.UnknownHostException) {
                 // The likeliest failure this phase introduces: a typo in the new host override.
-                hint = " " + HOST_ENV + "=\"" + host + "\" does not resolve to an address.";
+                hint = " " + LunarConfig.HOST_ENV + "=\"" + host + "\" does not resolve to an address.";
             } else {
                 // The loopback refusal from McpHttpServer lands here, and its own message already
                 // names the address and the reason, so it needs nothing added.
@@ -99,50 +98,30 @@ public class LunarServer {
         }
     }
 
-    /** {@code LUNAR_MCP_HOST} when set, else the documented default. */
-    private static String host() {
-        return hostFrom(System.getenv(HOST_ENV));
-    }
-
-    /**
-     * {@code LUNAR_MCP_PORT} when it parses to a usable port, else the documented default. An
-     * unusable value falls back rather than throwing, because a typo should not be the reason the
-     * endpoint is missing at all -- but it is never silent, unlike a bind failure. A discarded
-     * value is logged by name, because otherwise a user who set the variable and mistyped their
-     * client URL has no way to learn the setting was ignored.
-     */
-    private static int port() {
-        String configured = System.getenv(PORT_ENV);
-        if (configured == null || configured.isBlank())
-            return DEFAULT_PORT;
-        // Parse once here rather than re-deriving the outcome from the raw text, so the warning can
-        // never drift from what portFrom actually accepts.
-        try {
-            int value = Integer.parseInt(configured.trim());
-            if (value >= 1 && value <= 65535)
-                return value;
-        } catch (NumberFormatException ignored) {
-            // Falls through to the warning below.
-        }
-        log(IStatus.WARNING, "Ignoring " + PORT_ENV + "=\"" + configured + "\": not a port in 1-65535. "
-                + "Using the default " + DEFAULT_PORT + " instead.", null);
-        return DEFAULT_PORT;
-    }
-
     // Package-private so SelfCheck exercises this logic rather than a copy of it.
     static String hostFrom(String configured) {
         return configured == null || configured.isBlank() ? DEFAULT_HOST : configured.trim();
     }
 
-    static int portFrom(String configured) {
+    /**
+     * Whether the text is a port this server could actually bind. Split out from {@link #portFrom}
+     * because the caller has to know both things: which value to use, and whether the value it
+     * was given was discarded. A caller that only asked {@link #portFrom} could not tell a
+     * deliberate 8124 from a typo that quietly became one.
+     */
+    static boolean isUsablePort(String configured) {
         if (configured == null || configured.isBlank())
-            return DEFAULT_PORT;
+            return false;
         try {
             int value = Integer.parseInt(configured.trim());
-            return value >= 1 && value <= 65535 ? value : DEFAULT_PORT;
+            return value >= 1 && value <= 65535;
         } catch (NumberFormatException e) {
-            return DEFAULT_PORT;
+            return false;
         }
+    }
+
+    static int portFrom(String configured) {
+        return isUsablePort(configured) ? Integer.parseInt(configured.trim()) : DEFAULT_PORT;
     }
 
     @Deactivate
@@ -169,7 +148,19 @@ public class LunarServer {
         }
     }
 
-    private static void log(int severity, String message, Throwable t) {
-        Platform.getLog(LunarServer.class).log(new Status(severity, "com.github.lunar.core", message, t));
+    static void log(int severity, String message, Throwable t) {
+        try {
+            Platform.getLog(LunarServer.class)
+                    .log(new Status(severity, "com.github.lunar.core", message, t));
+        } catch (RuntimeException noPlatform) {
+            // Platform.getLog throws outside OSGi rather than returning a no-op log, so anything
+            // that reports a configuration problem before the platform is up would replace the
+            // warning with an exception -- and the self-check runs in a plain JVM. Falling back to
+            // the console keeps the message, which is the entire reason it was logged.
+            System.err.println("[LUNAR] " + message);
+            if (t != null) {
+                t.printStackTrace();
+            }
+        }
     }
 }

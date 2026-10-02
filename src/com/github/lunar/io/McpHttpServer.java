@@ -230,10 +230,6 @@ public final class McpHttpServer {
                     return;
                 }
                 session = ToolDispatcher.createSession();
-                // Native Code Mode 2.0.20 retained stale discovery in the verified active run.
-                // Keep other clients lazy; this verified client needs its complete callable catalog.
-                if ("cli".equals(client.get("name")) && "2.0.20".equals(client.get("version")))
-                    ToolDispatcher.exposeAllTools(session);
                 ex.getResponseHeaders().set(SESSION_HEADER, session);
             }
             boolean toolCall = "tools/call".equals(req.method);
