@@ -41,7 +41,7 @@ An agent working on files and a shell cannot know whether its edit compiles, wha
 
 ## Requirements
 
-- **Windows.** The build pins `org.eclipse.swt.win32.win32.x86_64`; the scripts are PowerShell.
+- **Windows.** The build requires `org.eclipse.swt.win32.win32.x86_64` and resolves it at the highest version the pool carries; the scripts are PowerShell.
 - **JDK 21** on `PATH`. Every bundle declares `Bundle-RequiredExecutionEnvironment: JavaSE-21`.
 - **Eclipse 2025-12 (4.38).** Bundles need `org.eclipse.core.filebuffers` 3.8.0+, `org.eclipse.core.resources` 3.23.0+, `org.eclipse.core.runtime` 3.34.0+, `org.eclipse.debug.core` 3.23.0+, `org.eclipse.debug.ui` 3.19.0+, `org.eclipse.equinox.app` 1.7.0+, `org.eclipse.jdt.core` 3.44.0+, `org.eclipse.jdt.debug` 3.25.0+, `org.eclipse.jdt.junit.core` 3.14.0+, `org.eclipse.jdt.launching` 3.24.0+, `org.eclipse.osgi` 3.24.0+, `org.eclipse.swt` 3.132.0+, `org.eclipse.text` 3.14.0+, `org.eclipse.ui.console` 3.15.0+, `org.eclipse.ui.workbench` 3.137.0+. The classpath resolves by bundle id and version range, so a pool must carry every floor listed.
 - **A bearer token**, in `ECLIPSE_MCP_TOKEN` or `%USERPROFILE%\.lunar\config.json`, set **before** Eclipse starts. The server refuses to bind without one.
@@ -166,10 +166,12 @@ claude mcp add --transport http lunar http://127.0.0.1:8124/mcp --header "Author
 Ask the agent *"List the projects in the Eclipse workspace."* You should see a `list_projects` call with one entry per project. Or, without an agent:
 
 ```powershell
-curl.exe -s -X POST http://127.0.0.1:8124/mcp -H "Authorization: Bearer $env:ECLIPSE_MCP_TOKEN" -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+curl.exe -s -X POST http://127.0.0.1:8124/mcp -H "Authorization: Bearer $env:ECLIPSE_MCP_TOKEN" -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}'
 ```
 
 Expect HTTP 200 and 18 tools. Drop the `Authorization` header and you get `401`, which proves the token is enforced.
+
+The escaped `\"` are required on Windows PowerShell 5.1: it hands `curl.exe` the argument intact, quotes included, then loses the inner quotes when it re-quotes the argument for the native process, so the JSON arrives unquoted; unescaped, the server answers `-32700 parse error`. On PowerShell 7+ the plain `'{"jsonrpc"...}'` form works. `tools/list` is accepted without a prior `initialize`, so this is a genuine handshake check.
 
 ## How to use it
 
@@ -345,6 +347,8 @@ p2 leaves files on disk at uninstall by design, so a restart is required either 
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\check-env.ps1
 ```
+
+`build.ps1` takes four mode switches: no switch, `-Install`, `-InstallP2` and `-NoInstall`. Only `-Install` and `-InstallP2` touch your Eclipse; both refuse to run while an Eclipse from that installation is alive. `-NoInstall` is accepted as an explicit "do not install" and is rejected alongside `-Install`; it changes nothing, checks-only is what an absent install switch already means. `-EclipseHome` and `-PoolDir` override discovery (see [Finding your Eclipse](#finding-your-eclipse)). A build with no install switch writes only `out\` and `build-state.json`; `-Install` also writes `backup\installed-<ts>\` and your Eclipse's `dropins`, and `-InstallP2` also writes `site\`. `.gitignore` covers all four.
 
 `build.ps1` compiles everything with `javac --release 21`, runs four check classes (`SelfCheck`, `ProtocolCheck`, `FrameworkCheck`, `IntegrationCheck`) and fails on any compile error or check failure. It records jar paths, sizes and SHA-256 hashes in `build-state.json` and gates packaging on a check against the jars that were actually produced.
 
