@@ -20,6 +20,14 @@ jobs:
       # exist: checked 2026-10-03 at 305,147,080 bytes.
       ECLIPSE_DROP: R-4.38-202512010920
       ECLIPSE_ZIP: https://download.eclipse.org/eclipse/downloads/drops4/R-4.38-202512010920/eclipse-SDK-4.38-win32-x86_64.zip
+      # The SDK zip is an installed profile, not a p2 repository, so it does not carry
+      # every bundle build.ps1 resolves -- org.eclipse.osgi.services supplies the DS
+      # annotations LunarServer compiles against. It lives in the update site for the
+      # same drop, and in .p2/pool of an installed Eclipse, just not in <home>/plugins.
+      # Bump this whenever ECLIPSE_DROP moves; build.ps1 still lists every bundle it
+      # cannot find, so a second gap shows up as a loud failure rather than a slow one.
+      ECLIPSE_TOPUP_SITE: https://download.eclipse.org/eclipse/updates/4.38/R-4.38-202512010920/plugins/
+      ECLIPSE_TOPUP_JAR: org.eclipse.osgi.services_3.12.300.v20250707-1221.jar
     steps:
       - uses: actions/checkout@v7
 
@@ -61,6 +69,19 @@ jobs:
           $eclipseHome = Split-Path -Parent $exe.FullName
           Write-Host "Eclipse at $eclipseHome"
           "ECLIPSE_HOME=$eclipseHome" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Top up bundles the SDK profile does not install
+        shell: pwsh
+        run: |
+          $target = Join-Path $env:ECLIPSE_HOME "plugins\$env:ECLIPSE_TOPUP_JAR"
+          if (Test-Path -LiteralPath $target) {
+            Write-Host "already present: $env:ECLIPSE_TOPUP_JAR"
+            exit 0
+          }
+          $url = $env:ECLIPSE_TOPUP_SITE + $env:ECLIPSE_TOPUP_JAR
+          Write-Host "fetching $url"
+          curl.exe -fsSL --retry 3 -o $target $url
+          if ($LASTEXITCODE -ne 0) { throw "fetching $env:ECLIPSE_TOPUP_JAR failed: $LASTEXITCODE" }
 
       - name: Build and run the check classes
         # build.cmd is the entry point, not build.ps1: it spawns a child powershell with
