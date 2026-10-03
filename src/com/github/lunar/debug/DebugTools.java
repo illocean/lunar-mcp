@@ -62,8 +62,8 @@ public final class DebugTools implements ToolProvider {
                     "threadOffset",integer(0,0,Integer.MAX_VALUE),"threadLimit",integer(50,1,200),
                     "includeTerminated",bool(false))), this::targets),
             tool("list_breakpoints", "List registered breakpoints", READ, object(paging()), this::breakpoints),
-            tool("set_breakpoint", "Create or enable a Java line breakpoint in a workspace source file", MUTATE,
-                object(Map.of("path",string(),"typeName",string(),"line",Map.of("type","integer","minimum",1,"maximum",Integer.MAX_VALUE),
+            tool("set_breakpoint", "Create or enable a Java line breakpoint; path is project-relative when project is given, workspace-absolute otherwise", MUTATE,
+                object(Map.of("project",string(),"path",string(),"typeName",string(),"line",Map.of("type","integer","minimum",1,"maximum",Integer.MAX_VALUE),
                     "enabled",bool(true)),"path","typeName","line"), this::setBreakpoint),
             tool("remove_breakpoint", "Remove one registered breakpoint by its returned id", MUTATE,
                 object(Map.of("breakpointId",string()),"breakpointId"), (a,b) -> {
@@ -228,9 +228,27 @@ public final class DebugTools implements ToolProvider {
         }
         return info;
     }
+
+    /**
+     * Resolve a breakpoint target from either addressing form.
+     *
+     * <p>{@code set_breakpoint} was the one debug tool taking a workspace-absolute path while every
+     * other tool took a project and a project-relative path. Both are accepted now: give
+     * {@code project} with a relative path, or the absolute path alone. Package-private so
+     * {@link SelfCheck} exercises the decision rather than a copy of it.
+     */
+    static String workspacePath(String project, String path) {
+        if (project == null || project.isBlank()) return path;
+        if (project.indexOf('/') >= 0 || project.indexOf('\\') >= 0
+                || project.equals(".") || project.equals(".."))
+            throw new RequestError("invalid_project", "project must be the exact name from list_projects");
+        if (path.startsWith("/"))
+            throw new RequestError("invalid_path", "path is relative to the project when project is given");
+        return "/" + project + "/" + path;
+    }
     private Object setBreakpoint(Map<String,Object> args,CallBudget budget) throws Exception {
         String path = text(args,"path"), typeName = text(args,"typeName"); int line = number(args,"line");
-        Path resourcePath = new Path(path);
+        Path resourcePath = new Path(workspacePath(text(args,"project"), path));
         if (resourcePath.getDevice() != null || resourcePath.segmentCount() < 2
                 || Arrays.asList(resourcePath.segments()).stream().anyMatch(segment -> segment.equals("..") || segment.equals(".")))
             throw new RequestError("invalid_path", "path must identify a workspace file, e.g. /Project/src/Main.java");
@@ -406,5 +424,20 @@ public final class DebugTools implements ToolProvider {
                     case "hashCode" -> System.identityHashCode(proxy); case "equals" -> proxy == args[0]; default -> null; }));
             throw new AssertionError("terminated thread accepted"); }
         catch (RequestError expected) { if (!"thread_terminated".equals(expected.code)) throw new AssertionError("code"); }
+        // set_breakpoint addresses a file two ways; both must land on the same workspace path.
+        if (!"/Proj/src/Main.java".equals(workspacePath("Proj", "src/Main.java")))
+            throw new AssertionError("project-relative path not resolved");
+        if (!"/Proj/Main.java".equals(workspacePath("Proj", "Main.java")))
+            throw new AssertionError("project-root file not resolved");
+        if (!"/Proj/src/Main.java".equals(workspacePath(null, "/Proj/src/Main.java")))
+            throw new AssertionError("absolute path mangled");
+        if (!"/Proj/src/Main.java".equals(workspacePath("", "/Proj/src/Main.java")))
+            throw new AssertionError("blank project must fall back to the absolute form");
+        if (!"/Proj/src/Main.java".equals(workspacePath("  ", "/Proj/src/Main.java")))
+            throw new AssertionError("blank project must fall back to the absolute form");
+        try { workspacePath("../evil", "src/Main.java"); throw new AssertionError("traversal project accepted"); }
+        catch (RequestError expected) { if (!"invalid_project".equals(expected.code)) throw new AssertionError("code"); }
+        try { workspacePath("Proj", "/src/Main.java"); throw new AssertionError("absolute path mixed with project"); }
+        catch (RequestError expected) { if (!"invalid_path".equals(expected.code)) throw new AssertionError("code"); }
     }
 }

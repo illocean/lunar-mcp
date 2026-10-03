@@ -252,14 +252,14 @@ The full loop, driven over the wire: set a breakpoint, launch in debug mode, wal
 | --- | --- | --- |
 | `list_debug_targets` | Targets and their threads | none |
 | `list_breakpoints` | Ids, source locations, enabled state | none |
-| `set_breakpoint` | Create or enable a line breakpoint. **Workspace-absolute** path, one-based line | `path`, `typeName`, `line` |
+| `set_breakpoint` | Create or enable a line breakpoint. Give `project` with a project-relative path, or a workspace-absolute `path` alone | `path`, `typeName`, `line` |
 | `remove_breakpoint` | Remove by its returned id | `breakpointId` |
 | `get_frames` | Frames for a suspended thread, issuing frame handles | `threadId` |
 | `get_variables` | Expand one level, with index paths and array paging | `frameId` |
 | `continue_execution` | Resume; invalidates frame handles | `threadId` |
 | `step_into` / `step_over` / `step_return` | Step and wait for suspension or termination | `threadId` |
 
-`set_breakpoint` is the one tool that takes a workspace-absolute path while every other tool takes project-relative. It is deliberate, and it is the easiest thing to get wrong.
+`set_breakpoint` is the only tool that addresses a file two ways: give `project` with a project-relative `path`, or a workspace-absolute `path` on its own. Every other tool takes `project` plus a relative path.
 
 ## Compared to other Eclipse MCP servers
 
