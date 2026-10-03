@@ -96,3 +96,17 @@ jobs:
         # runs second. It reports through Write-Host and exits 1 on any failure.
         shell: pwsh
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\check-env.ps1
+
+      - name: Install into dropins for the smoke test
+        # A second build with -Install, not a copy: the jars in dropins have to be the ones
+        # this commit produced, and build.ps1 already owns the dropins layout and the backup.
+        shell: pwsh
+        run: .\build.cmd -EclipseHome $env:ECLIPSE_HOME -Install
+
+      - name: Boot Eclipse headless and call the endpoint
+        # The one gate nothing else covers: that the bundles resolve, activate and leave a
+        # listener behind. check-env.ps1 proves the files agree; javac and the self-check only
+        # prove the code is sound. A bundle whose dependency does not resolve never starts,
+        # and all three still pass.
+        shell: pwsh
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\smoke-endpoint.ps1 -EclipseHome $env:ECLIPSE_HOME
