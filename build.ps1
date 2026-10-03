@@ -204,10 +204,23 @@ if ($InstallP2) {
     }
     Assert-LunarP2Installed -DataArea (Resolve-LunarP2DataArea -EclipseHome $eclipseHomePath) -Bundles $bundles
 }
-$artifactDetails = @(foreach ($artifact in $artifacts) {
-    @{ path = $artifact; bytes = (Get-Item -LiteralPath $artifact).Length;
-       sha256 = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash }
-})
+# SHA256 from the framework rather than Get-FileHash. That cmdlet lives in the
+# Microsoft.PowerShell.Utility module and has to be autoloaded to be found, and a
+# module-backed cmdlet is the one thing these scripts may not assume: build.cmd hands
+# Windows PowerShell 5.1 whatever PSModulePath the caller had, which on a PowerShell 7
+# host points at PowerShell 7's modules, and autoloading one of those into 5.1 fails.
+# Every other cmdlet here is a built-in that is already present, which is why only this
+# line broke. A digest from System.Security.Cryptography needs no module at all.
+$sha256 = [System.Security.Cryptography.SHA256]::Create()
+try {
+    $artifactDetails = @(foreach ($artifact in $artifacts) {
+        @{ path = $artifact; bytes = (Get-Item -LiteralPath $artifact).Length;
+           sha256 = [BitConverter]::ToString(
+               $sha256.ComputeHash([IO.File]::ReadAllBytes($artifact))).Replace('-', '') }
+    })
+} finally {
+    $sha256.Dispose()
+}
 @{ classesPath = $classesDir; classPath = $classPath; artifact = $ioArtifact; artifacts = $artifacts;
     artifactDetails = $artifactDetails; checkedAt = (Get-Date -Format o);
     installed = [bool]$Install; installedBackup = $backupDir; installedP2 = [bool]$InstallP2;
