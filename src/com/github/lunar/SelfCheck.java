@@ -312,6 +312,21 @@ public final class SelfCheck {
         yes("isUsablePort rejects the text it would discard",
                 !LunarServer.isUsablePort("eighty") && !LunarServer.isUsablePort("0")
                         && !LunarServer.isUsablePort("70000") && !LunarServer.isUsablePort("-1"));
+        // The p2 build applications boot this installation and activate the bundle. Binding there
+        // fails against a headless product, so the endpoint must never be attempted.
+        yes("a p2 director run is detected as a build",
+                LunarServer.isP2Build(new String[] {"-application",
+                        "org.eclipse.equinox.p2.director", "-repository", "file:/site"}));
+        yes("a p2 publisher run is detected as a build",
+                LunarServer.isP2Build(new String[] {"-application",
+                        "org.eclipse.equinox.p2.publisher.FeaturesAndBundlesPublisher"}));
+        yes("a workspace launch is not mistaken for a build",
+                !LunarServer.isP2Build(new String[] {"-data", "C:\\ws", "-application",
+                        "org.eclipse.ui.ide.workbench"}));
+        yes("a command line with no -application is not a build",
+                !LunarServer.isP2Build(new String[] {"-nl", "en", "-consoleLog"}));
+        yes("a trailing -application with no value is not a build",
+                !LunarServer.isP2Build(new String[] {"-application"}));
         checkConfigFile();
         // The guard itself: a routable bind address must be refused before any listener exists.
         // If the guard ever regresses, the listener it accepted would stay open for the life of

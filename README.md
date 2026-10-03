@@ -304,7 +304,7 @@ There is no benchmark. This table is a feature comparison from published documen
 
 ## Install as a p2 update site
 
-`build.ps1 -InstallP2` publishes into `site\` and installs through the p2 director, generating `feature.xml` and `category.xml` from the manifests. No Tycho or PDE build, so the feature is *generated* — p2 reads a feature entry's version as an **exact** match, not a floor, so a stale value publishes and installs nothing. Each jar is named `<id>_<version>.jar` to match. Expect one `LUNAR MCP endpoint failed to start on <url>` line in the log and treat it as a false alarm: the publisher boots the full Eclipse product named in `eclipse.ini`, which activates the bundles already in `dropins`, and a headless product has no workspace yet — one such error is logged and the publish itself is unaffected.
+`build.ps1 -InstallP2` publishes into `site\` and installs through the p2 director, generating `feature.xml` and `category.xml` from the manifests. No Tycho or PDE build, so the feature is *generated* — p2 reads a feature entry's version as an **exact** match, not a floor, so a stale value publishes and installs nothing. Each jar is named `<id>_<version>.jar` to match. The p2 applications boot this Eclipse installation, which activates the bundle; lunar detects a p2 build application by its `-application` id and stays dormant instead of binding an endpoint nothing can reach, so the log stays clean.
 
 Two things to know before choosing this over `-Install`:
 

@@ -44,6 +44,13 @@ public class LunarServer {
      * logged reason below still names the cause.
      */
     public LunarServer() {
+        // A p2 build application boots this installation without a workspace, so binding would fail
+        // and log a failure that means nothing to anyone. Do not bind at all.
+        if (isP2Build(Platform.getCommandLineArgs())) {
+            log(IStatus.INFO, "lunar is dormant: this process is a p2 build application, "
+                    + "which has no workspace and no reachable endpoint.", null);
+            return;
+        }
         LunarConfig config = LunarConfig.resolve();
         String host = config.host();
         int port = config.port();
@@ -122,6 +129,24 @@ public class LunarServer {
 
     static int portFrom(String configured) {
         return isUsablePort(configured) ? Integer.parseInt(configured.trim()) : DEFAULT_PORT;
+    }
+
+    /**
+     * Whether this process is running a p2 build application rather than a workspace launch.
+     *
+     * <p>{@code -InstallP2} drives the p2 publisher and director through
+     * {@code eclipsec -application org.eclipse.equinox.p2.*}. That boots the same installation and
+     * activates this bundle, but a build has no workspace and nothing can call the endpoint, so a
+     * bind there fails for no reason. The failure used to be documented as a harmless log line;
+     * not binding removes it.
+     *
+     * <p>Package-private so {@link SelfCheck} exercises the decision rather than a copy of it.
+     */
+    static boolean isP2Build(String[] args) {
+        for (int i = 0; i + 1 < args.length; i++)
+            if ("-application".equals(args[i]) && args[i + 1].startsWith("org.eclipse.equinox.p2."))
+                return true;
+        return false;
     }
 
     @Deactivate
