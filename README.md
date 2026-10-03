@@ -261,34 +261,63 @@ The full loop, driven over the wire: set a breakpoint, launch in debug mode, wal
 
 `set_breakpoint` is the only tool that addresses a file two ways: give `project` with a project-relative `path`, or a workspace-absolute `path` on its own. Every other tool takes `project` plus a relative path.
 
-## Compared to other Eclipse MCP servers
+## What is unusual about this
 
-Checked against their published READMEs and Eclipse Marketplace listings in October 2026. Treat the competitor cells as their own claims, not as my measurements.
+Claims below are about lunar's own shipped behaviour. lunar does not publish a
+feature-by-feature comparison against other Eclipse MCP servers, and there is
+deliberately no such table here: a grid of cells about other people's projects
+goes stale the moment any of them changes a line of their README, and a wrong
+cell in a comparison table is a public claim about someone else's software.
+Compare against their own documentation, linked at the end.
 
-| | **lunar** | AssistAI | vogella | maxmart | eclipse-agents |
-|---|---|---|---|---|---|
-| Transport | 1 HTTP endpoint | 7 endpoints | 1 HTTP | 1 HTTP | SSE |
-| **Debugger control** | **full loop** | yes | **no, by design** | **no** | – |
-| Expression eval / hot-swap / conditional bp | – | yes | no | no | – |
-| **Hash-guarded writes** | **`expectedHash` everywhere** | – | read-only | – | – |
-| **Per-tool risk tier** | **yes, in every schema** | – | – | – | – |
-| Lazy toolsets / batch / baseline-delta | yes | – | – | – | – |
-| JDT build + real markers | yes | yes | yes | partial | markers |
-| JUnit native counts | yes | – | – | – | – |
-| Extra runtime deps | **none** | Node bridge (`npx mcp-remote`) | target-platform download | – | MCP Java SDK |
-| Refactoring engine | – | yes | no | – | – |
-| Type / call hierarchy | – | – | strong JDT search | – | – |
-| Active editor / selection | – | – | yes | – | editors |
-| Maven / git / web tools | – | yes | no | no | – |
-| Platforms | Windows | Java 21 | any | Claude Code only | Eclipse |
+**Writes are guarded by a hash.** Every tool that writes to a file that already
+exists takes an `expectedHash` of the content the agent read. If the file
+changed since, the call is refused rather than applied over the top. All of them
+are workspace tools, the only ones that touch files:
 
-**Where lunar actually wins.** The debugger is the honest one: of the four, vogella and maxmart ship no debugger control at all by design, so an agent cannot step through a failure. AssistAI has one, but needs an `npx mcp-remote` bridge. The second real difference is safety: every mutating tool refuses to act on a file whose contents changed since the agent read it, and every schema advertises a risk tier, readable before the call runs. Note that clients allow and deny by tool name, not by tier, so a read-only setup is a deny list of the mutating and destructive names. Third, one endpoint and zero runtime dependencies — no bridge, no first-run target-platform download, no Maven, Gradle or Tycho.
+| Tool | Writes | Guard |
+|---|---|---|
+| `create_file` | new file, refuses to overwrite | n/a, nothing to hash yet |
+| `write_file` | full content | `expectedHash` |
+| `apply_edit` | a UTF-16 character range | `expectedHash` |
+| `move_file` | path | `expectedHash` |
+| `delete_file` | path | `expectedHash` |
 
-**Where lunar is behind, stated plainly.** No refactoring engine, no expression evaluation, hot-swap, conditional breakpoints or logpoints. No type or call hierarchy tools, where vogella's JDT search is genuinely strong. No active-editor or selection context. No Maven, git or web tools. Windows only, and at 47 tools AssistAI's feature surface is still much wider. No Eclipse Marketplace listing yet, and 1.0.0 has no tag and no GitHub Release.
+Note that clients allow and deny by tool name, not by risk tier, so a read-only
+setup is a deny list of the mutating and destructive names.
 
-**When to pick something else.** A macOS or Linux user, or anyone who cannot install a Windows build, is out of luck here. If you want automated refactoring rather than compile-checked edits, AssistAI. If you want read-only IDE introspection with a much deeper JDT search and multi-platform support, vogella. If you want a first-party Eclipse Foundation project, eclipse-agents.
+**Every schema carries a risk tier**, readable from `tools/list` before any call
+runs.
 
-There is no benchmark. This table is a feature comparison from published documentation, not a measurement.
+**One endpoint, no runtime dependencies.** No bridge process, no target-platform
+download, no Maven, Gradle or Tycho. The five jars go in `dropins` and the
+listener answers.
+
+**A debug loop**: line breakpoints, run and debug launch, resume, step
+in/over/out, frame handles and variable inspection.
+
+**Lazy toolsets.** 47 tools, 18 visible at start. `load_toolset` reveals the rest
+for one session. Clients that cache `tools/list` must re-read it after a load.
+
+**Stated plainly, what is missing.** No refactoring engine, no type or call
+hierarchy tools, no active-editor or selection context, no Maven, git or web
+tools, no expression evaluation, hot-swap or logpoints. Windows only. No Eclipse
+Marketplace listing yet.
+
+## Other Eclipse MCP servers
+
+Worth evaluating against their own documentation, not against this page:
+
+- [AssistAI](https://github.com/gradusnikov/eclipse-chatgpt-plugin) — exposes
+  the IDE over five HTTP endpoints, including refactoring, git and debugger
+  control.
+- [Eclipse MCP Server, vogella](https://github.com/vogellacompany/eclipse-mcp-server)
+  — read-mostly IDE introspection with deep JDT search and macOS/Linux support.
+- [maxmart/eclipse-mcp-server](https://github.com/maxmart/eclipse-mcp-server) —
+  a small Claude Code surface for build, launch and console output.
+- [eclipse-agents](https://github.com/eclipse-agents/eclipse-agents) — the
+  Eclipse Foundation's MCP and ACP implementation, and an extension point for
+  contributing tools.
 
 ## Limitations
 
