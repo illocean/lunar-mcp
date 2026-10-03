@@ -50,6 +50,14 @@ public final class ProtocolCheck {
             assert initialized.statusCode() == 200;
             assert ((Map<?, ?>)((Map<?, ?>)Json.parse(initialized.body())).get("result"))
                     .get("protocolVersion").equals(McpHttpServer.PROTOCOL_VERSION);
+            // serverInfo.version is the only value in the initialize result that is a typed
+            // literal rather than a protocol constant, so it is the one that can silently
+            // disagree with the bundle that was actually built. Asserted over the wire
+            // because that is the value a client actually reads. check-env.ps1 separately
+            // proves the literal matches the manifests; this proves the literal is served.
+            Map<?, ?> result = (Map<?, ?>) ((Map<?, ?>) Json.parse(initialized.body())).get("result");
+            assert ((String) ((Map<?, ?>) result.get("serverInfo")).get("version"))
+                    .equals(McpHttpServer.SERVER_VERSION);
             String session = initialized.headers().firstValue("Mcp-Session-Id").orElseThrow();
             assert send(client, uri, ping, "Mcp-Session-Id", session).body().contains("\"result\":{}");
             HttpResponse<String> notification = send(client, uri,

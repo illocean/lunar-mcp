@@ -175,8 +175,11 @@ public class LunarServer {
 
     static void log(int severity, String message, Throwable t) {
         try {
+            // com.github.lunar.io, not com.github.lunar.core: build.ps1 stages LunarServer
+            // into the io bundle, so anything logged from here lands in the platform log
+            // attributed to a bundle that is not running this code.
             Platform.getLog(LunarServer.class)
-                    .log(new Status(severity, "com.github.lunar.core", message, t));
+                    .log(new Status(severity, "com.github.lunar.io", message, t));
         } catch (RuntimeException noPlatform) {
             // Platform.getLog throws outside OSGi rather than returning a no-op log, so anything
             // that reports a configuration problem before the platform is up would replace the

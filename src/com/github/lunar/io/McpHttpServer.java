@@ -27,7 +27,11 @@ public final class McpHttpServer {
 
     public static final String PROTOCOL_VERSION = "2025-06-18";
     public static final String SERVER_NAME = "lunar";
-    public static final String SERVER_VERSION = "0.0.1";
+    // The version a client is told it is talking to. A literal here rather than the shipped
+    // Bundle-Version because this class is also constructed in a plain JVM by ProtocolCheck,
+    // where there is no bundle to ask. The two are pinned together by check-env.ps1, so a
+    // release bump that misses this literal fails the build instead of shipping a lie.
+    public static final String SERVER_VERSION = "1.0.0";
 
     private static final int PARSE_ERROR = -32700;
     private static final int INVALID_REQUEST = -32600;

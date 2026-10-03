@@ -240,9 +240,7 @@ Write-Host 'build.ps1 floors agree with the manifests'
 # manifests so they cannot drift. Nothing enforced that, so a manifest bump would
 # have silently disagreed with the build. This is what makes the claim true.
 $manifestText = ''
-foreach ($manifest in @(
-        (Join-Path $PSScriptRoot 'src\META-INF\MANIFEST.MF')) +
-        @(Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'bundles') -Filter 'MANIFEST.MF' -Recurse |
+foreach ($manifest in @(Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'bundles') -Filter 'MANIFEST.MF' -Recurse |
             ForEach-Object FullName)) {
     # Unfold first. A wrapped header continues on the next line with one leading
     # space, which routinely splits a bundle id -- 'org.eclip' / 'se.jdt.launching'.
@@ -276,6 +274,39 @@ Assert-True 'no bundle carries a floor that no manifest declares' `
     (@($buildFloors.Keys | Where-Object {
         $_ -notlike 'com.github.lunar.*' -and -not $manifestFloors.ContainsKey($_)
       }).Count -eq 0)
+
+Write-Host 'the version lunar reports to clients agrees with what ships'
+# The p2 feature, the jar names and the install paths are all derived from
+# Bundle-Version, so the manifests are the one place a release bump happens. The one
+# thing not derived from them is SERVER_VERSION, the version handed to a client in the
+# initialize result -- a literal, because McpHttpServer is also built in a plain JVM by
+# ProtocolCheck where there is no bundle to ask. A literal nothing checks is how it sat
+# at 0.0.1 while all five manifests said 1.0.0: the build stayed green and every client
+# was told the wrong version.
+$serverVersion = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'src\com\github\lunar\io\McpHttpServer.java') -Raw
+if ($serverVersion -notmatch 'SERVER_VERSION\s*=\s*"([^"]+)"') {
+    Assert-True 'SERVER_VERSION is a literal that can be read back' $false
+} else {
+    Assert-True 'SERVER_VERSION is a literal that can be read back' $true
+    $declared = $Matches[1]
+    $manifestVersions = @{}
+    foreach ($manifest in Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'bundles') -Filter 'MANIFEST.MF' -Recurse) {
+        $header = Get-Content -LiteralPath $manifest.FullName -Raw
+        # Two separate matches on purpose: $Matches is overwritten by the second one, so
+        # reading both captures out of a single -and would key the table on the version.
+        $symbolic = $header -match 'Bundle-SymbolicName:\s*([^\r\n;]+)'
+        $symbolicName = if ($symbolic) { $Matches[1] } else { $null }
+        $numbered = $header -match 'Bundle-Version:\s*([0-9][^\r\n]*)'
+        if ($symbolic -and $numbered) {
+            $manifestVersions[$symbolicName] = $Matches[1].Trim()
+        }
+    }
+    # Five bundles is the split as it stands; fewer means a bundle is missing a manifest
+    # and this section would pass by comparing against whatever did survive.
+    Assert-True 'all five lunar manifests declared a version to compare against' ($manifestVersions.Count -eq 5)
+    Assert-True ('every lunar bundle ships ' + $declared + ' (the version clients are told)') `
+        (@($manifestVersions.Values | Where-Object { $_ -ne $declared }).Count -eq 0)
+}
 
 Write-Host 'lunar ranges resolve against the versions the build ships'
 # The floor check above skips com.github.lunar.* and reads only the lower bound, so it
