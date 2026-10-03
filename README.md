@@ -34,7 +34,7 @@ An agent working on files and a shell cannot know whether its edit compiles, wha
 | **Protocol** | MCP streamable HTTP, `2025-06-18`, one URL. Not stdio — there is nothing to launch. |
 | **Transport auth** | `Authorization: Bearer $ECLIPSE_MCP_TOKEN` on every request, loopback only. A missing token is `401`. |
 | **Tools** | 47 total. 18 are visible at start; `load_toolset` exposes the other 29. |
-| **Safety** | Every schema carries `x-lunar-risk-tier` (`read`/`build`/`mutate`/`destructive`) for client allow-lists. |
+| **Safety** | Every schema carries `x-lunar-risk-tier` (`read`/`build`/`mutate`/`destructive`), so what a call may do is readable before it runs. |
 | **Writes** | `write_file`, `move_file`, `delete_file`, `apply_edit`, `apply_quick_fix` all require the current `read_file` hash as `expectedHash`. |
 | **Deps** | None. No Maven, Gradle, Ant or Tycho. Compiled with plain `javac --release 21`. |
 | **Platform** | Windows only. |
@@ -171,7 +171,9 @@ curl.exe -s -X POST http://127.0.0.1:8124/mcp -H "Authorization: Bearer $env:ECL
 
 Expect HTTP 200 and 18 tools. Drop the `Authorization` header and you get `401`, which proves the token is enforced.
 
-The escaped `\"` are required on Windows PowerShell 5.1: it hands `curl.exe` the argument intact, quotes included, then loses the inner quotes when it re-quotes the argument for the native process, so the JSON arrives unquoted; unescaped, the server answers `-32700 parse error`. On PowerShell 7+ the plain `'{"jsonrpc"...}'` form works. `tools/list` is accepted without a prior `initialize`, so this is a genuine handshake check.
+The escaped `\"` are required on Windows PowerShell 5.1 through 7.3: those versions re-quote the argument as one string for the native process and drop the inner quotes, so the JSON arrives unquoted and the server answers `-32700 parse error`. PowerShell 7.4 is where that stopped mattering — its `Windows` mode still falls back to the old behaviour for `.cmd`, `.bat`, `wscript`, `find.exe` and similar, but `curl.exe` is not on that list and gets a real argument list, so on 7.4+ the plain `'{"jsonrpc"...}'` form works. On 7.3, set `$PSNativeCommandArgumentPassing = 'Standard'` to get it.
+
+This proves the endpoint is reachable and the token is enforced, not that the MCP handshake works: `tools/list` is accepted without a prior `initialize`. A real client sends `initialize` first.
 
 ## How to use it
 
@@ -189,6 +191,8 @@ Results that exceed the per-call byte budget are truncated with a session cursor
 47 total, by toolset: 7 core, 21 workspace, 9 run, 10 debug. The 18 visible at start are the eight tools in the first table plus `project_info`, `list_files`, `read_file`, `search_text`, `get_problems`, `build_project`, `wait_until_quiet`, `list_launch_configs`, `launch`, `get_console_output`. `load_toolset` with `workspace`, `run`, `debug` or `all` reveals the rest for that session only. A client that caches its tool list must re-read it after a load.
 
 ### Core and paging
+
+The seven session tools here are always loaded and never sit behind `load_toolset`. `list_projects` belongs to the `workspace` toolset, but is always visible too.
 
 | Tool | Purpose | Required |
 | --- | --- | --- |
@@ -278,7 +282,7 @@ Checked against their published READMEs and Eclipse Marketplace listings in Octo
 | Maven / git / web tools | – | yes | no | no | – |
 | Platforms | Windows | Java 21 | any | Claude Code only | Eclipse |
 
-**Where lunar actually wins.** The debugger is the honest one: of the four, vogella and maxmart ship no debugger control at all by design, so an agent cannot step through a failure. AssistAI has one, but needs an `npx mcp-remote` bridge. The second real difference is safety: every mutating tool refuses to act on a file whose contents changed since the agent read it, and every schema advertises a risk tier, so a client can allow-list by risk. Third, one endpoint and zero runtime dependencies — no bridge, no first-run target-platform download, no Maven, Gradle or Tycho.
+**Where lunar actually wins.** The debugger is the honest one: of the four, vogella and maxmart ship no debugger control at all by design, so an agent cannot step through a failure. AssistAI has one, but needs an `npx mcp-remote` bridge. The second real difference is safety: every mutating tool refuses to act on a file whose contents changed since the agent read it, and every schema advertises a risk tier, readable before the call runs. Note that clients allow and deny by tool name, not by tier, so a read-only setup is a deny list of the mutating and destructive names. Third, one endpoint and zero runtime dependencies — no bridge, no first-run target-platform download, no Maven, Gradle or Tycho.
 
 **Where lunar is behind, stated plainly.** No refactoring engine, no expression evaluation, hot-swap, conditional breakpoints or logpoints. No type or call hierarchy tools, where vogella's JDT search is genuinely strong. No active-editor or selection context. No Maven, git or web tools. Windows only, and at 47 tools AssistAI's feature surface is still much wider. No Eclipse Marketplace listing yet, and 1.0.0 has no tag and no GitHub Release.
 
