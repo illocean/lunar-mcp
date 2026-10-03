@@ -5,7 +5,7 @@
 # testable offline; check-env.ps1 covers it against a synthetic site.
 #
 # Every step here has an equivalent the user can perform by hand, and the error
-# messages name that hand step. See README "Installing from the update site".
+# messages name that hand step. See README "Install as a p2 update site".
 
 # Reads Bundle-SymbolicName and Bundle-Version out of a bundle manifest.
 #
