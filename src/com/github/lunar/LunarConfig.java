@@ -26,6 +26,20 @@ final class LunarConfig {
     static final String HOST_ENV = "LUNAR_MCP_HOST";
     static final String PORT_ENV = "LUNAR_MCP_PORT";
 
+    /**
+     * Shortest token this server will accept, in characters.
+     *
+     * <p>The floor is on the token rather than on the transport, because a bearer token is
+     * the only thing standing between a local process and an endpoint that can delete
+     * projects from disk. A short one is a guessable one, and the comparison is constant
+     * time, so a guessable token gets exactly as many attempts as a good one.
+     *
+     * <p>32 characters is what OWASP gives as the floor for a generated secret (128 bits of
+     * entropy), and it is also the length of the hex form of 16 CSPRNG bytes, which is what
+     * the log line below tells the reader to make.
+     */
+    static final int MIN_TOKEN_LENGTH = 32;
+
     private final String host;
     private final int port;
     private final String token;
@@ -119,6 +133,24 @@ final class LunarConfig {
         } else {
             token = null;
             tokenSource = "unset";
+        }
+
+        // Refused exactly the way a blank token is, and for the same reason: falling through
+        // to "no token" makes the server decline to bind, which is the safe outcome. What is
+        // not safe is serving a credential that can be guessed, so a short one is not served
+        // with a warning -- it is not a token at all. Only the length is ever logged.
+        if (token != null && token.length() < MIN_TOKEN_LENGTH) {
+            LunarServer.log(IStatus.WARNING,
+                    "Ignoring the " + tokenSource + " token: " + token.length()
+                            + " characters is below the " + MIN_TOKEN_LENGTH
+                            + "-character minimum for a bearer token, and a guessable token is"
+                            + " not a token. Generate one with: powershell -NoProfile -Command"
+                            + " \"$b = New-Object byte[] 32;"
+                            + " [System.Security.Cryptography.RandomNumberGenerator]::Create()"
+                            + ".GetBytes($b); -join ($b | ForEach-Object { '{0:x2}' -f $_ })\"",
+                    null);
+            token = null;
+            tokenSource = "rejected (too short)";
         }
 
         return new LunarConfig(host, port, token, hostSource, portSource, tokenSource);

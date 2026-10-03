@@ -201,17 +201,17 @@ public final class SelfCheck {
             yes("an absent config file yields no token, so the server refuses to bind",
                     empty.token() == null);
 
-            Files.writeString(file, "{\"token\":\"file-token\",\"host\":\"localhost\",\"port\":9001}");
+            Files.writeString(file, "{\"token\":\"0123456789abcdef0123456789abcdef\",\"host\":\"localhost\",\"port\":9001}");
             LunarConfig fromFile =
                     LunarConfig.fromFile(LunarConfig.read(file), null, null, null);
-            yes("the config file supplies the token", "file-token".equals(fromFile.token()));
+            yes("the config file supplies the token", "0123456789abcdef0123456789abcdef".equals(fromFile.token()));
             yes("the config file supplies the host", "localhost".equals(fromFile.host()));
             yes("the config file supplies the port", fromFile.port() == 9001);
 
             // The whole point of the file being a fallback rather than a second source of truth.
             LunarConfig envWins =
-                    LunarConfig.fromFile(LunarConfig.read(file), "env-token", "10.0.0.1", "7000");
-            yes("the environment token wins over the file", "env-token".equals(envWins.token()));
+                    LunarConfig.fromFile(LunarConfig.read(file), "fedcba9876543210fedcba9876543210", "10.0.0.1", "7000");
+            yes("the environment token wins over the file", "fedcba9876543210fedcba9876543210".equals(envWins.token()));
             yes("the environment host wins over the file", "10.0.0.1".equals(envWins.host()));
             yes("the environment port wins over the file", envWins.port() == 7000);
 
@@ -220,7 +220,7 @@ public final class SelfCheck {
             LunarConfig blankEnv =
                     LunarConfig.fromFile(LunarConfig.read(file), "  ", "  ", "  ");
             yes("a blank environment token falls through to the file",
-                    "file-token".equals(blankEnv.token()));
+                    "0123456789abcdef0123456789abcdef".equals(blankEnv.token()));
             yes("a blank environment host falls through to the file",
                     "localhost".equals(blankEnv.host()));
             yes("a blank environment port falls through to the file", blankEnv.port() == 9001);
@@ -252,14 +252,27 @@ public final class SelfCheck {
             yes("a blank token in the file is not a token",
                     LunarConfig.fromFile(LunarConfig.read(file), null, null, null).token() == null);
 
+            // Same refusal for a token that is present but guessable. The endpoint can delete
+            // projects from disk, so the length is the floor, and it is checked when the config
+            // is read rather than per request: one log line at startup beats a 401 on every call.
+            Files.writeString(file, "{\"token\":\"0123456789abcdef0123456789abcde\"}");
+            yes("a 31-character token is refused, so the server will not bind",
+                    LunarConfig.fromFile(LunarConfig.read(file), null, null, null).token() == null);
+            Files.writeString(file, "{\"token\":\"0123456789abcdef0123456789abcdef\"}");
+            yes("a 32-character token is accepted",
+                    "0123456789abcdef0123456789abcdef".equals(
+                            LunarConfig.fromFile(LunarConfig.read(file), null, null, null).token()));
+            yes("a short token in the environment is refused too",
+                    LunarConfig.fromFile(LunarConfig.read(file), "abc", null, null).token() == null);
+
             // The values never reach the log, whatever happens.
-            Files.writeString(file, "{\"token\":\"super-secret-value\",\"port\":9001}");
+            Files.writeString(file, "{\"token\":\"cafebabecafebabecafebabecafebabe\",\"port\":9001}");
             String described = LunarConfig.fromFile(LunarConfig.read(file), null, null, null)
                     .describe();
             yes("describe names the source of each value",
                     described.contains("config file") && described.contains("9001"));
             yes("describe never contains the token itself",
-                    !described.contains("super-secret-value"));
+                    !described.contains("cafebabecafebabecafebabecafebabe"));
         } catch (IOException e) {
             fail("the config file self-check ran", e.toString());
         } finally {

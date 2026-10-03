@@ -1,0 +1,77 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Least privilege: this workflow only ever reads the repository.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      # The only maintenance knob here. The build resolves bundles by id and minimum
+      # version, so a newer 4.38 build changes nothing but this line. The drop must
+      # exist: checked 2026-10-03 at 305,147,080 bytes.
+      ECLIPSE_DROP: R-4.38-202512010920
+      ECLIPSE_ZIP: https://download.eclipse.org/eclipse/downloads/drops4/R-4.38-202512010920/eclipse-SDK-4.38-win32-x86_64.zip
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Cache the Eclipse SDK
+        uses: actions/cache@v6
+        with:
+          path: eclipse-sdk.zip
+          key: eclipse-sdk-${{ env.ECLIPSE_DROP }}-win32-x86_64
+
+      - name: Fetch and extract the Eclipse SDK
+        shell: pwsh
+        run: |
+          if (-not (Test-Path -LiteralPath eclipse-sdk.zip)) {
+            curl.exe -fsSL --retry 3 -o eclipse-sdk.zip $env:ECLIPSE_ZIP
+            if ($LASTEXITCODE -ne 0) { throw "downloading the Eclipse SDK failed: $LASTEXITCODE" }
+          }
+          # tar, not Expand-Archive: the SDK is thousands of small entries and
+          # Expand-Archive is minutes slower unpacking them.
+          New-Item -ItemType Directory -Force -Path eclipse-sdk | Out-Null
+          tar.exe -xf eclipse-sdk.zip -C eclipse-sdk
+
+      - name: Locate the installation
+        shell: pwsh
+        run: |
+          # The zip's nesting is not a thing to hardcode. Find eclipse.exe the way
+          # lunar-env.ps1 does -- by walking for it -- then take its directory.
+          #
+          # $eclipseHome, not $home: $HOME is a read-only automatic variable in
+          # PowerShell, so assigning to it throws and leaves the old value in place,
+          # which would publish the runner's user directory as the Eclipse home.
+          $exe = Get-ChildItem -LiteralPath eclipse-sdk -Filter eclipse.exe -Recurse -File |
+                 Select-Object -First 1
+          if (-not $exe) { throw 'eclipse.exe is not in the SDK zip; the download was truncated or the layout changed' }
+          $eclipseHome = Split-Path -Parent $exe.FullName
+          Write-Host "Eclipse at $eclipseHome"
+          "ECLIPSE_HOME=$eclipseHome" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build and run the check classes
+        # build.cmd is the entry point, not build.ps1: it spawns a child powershell with
+        # -NoProfile -ExecutionPolicy Bypass and propagates the exit code, so javac's
+        # deprecation note on stderr stays in the child instead of turning into a
+        # terminating error under $ErrorActionPreference = 'Stop'.
+        shell: pwsh
+        run: .\build.cmd -EclipseHome $env:ECLIPSE_HOME -NoInstall
+
+      - name: Run the environment self-check
+        # check-env.ps1 needs the jars the build just wrote to build-state.json, so it
+        # runs second. It reports through Write-Host and exits 1 on any failure.
+        shell: pwsh
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\check-env.ps1

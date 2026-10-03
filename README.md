@@ -44,7 +44,7 @@ An agent working on files and a shell cannot know whether its edit compiles, wha
 - **Windows.** The build requires `org.eclipse.swt.win32.win32.x86_64` and resolves it at the highest version the pool carries; the scripts are PowerShell.
 - **JDK 21** on `PATH`. Every bundle declares `Bundle-RequiredExecutionEnvironment: JavaSE-21`.
 - **Eclipse 2025-12 (4.38).** Bundles need `org.eclipse.core.filebuffers` 3.8.0+, `org.eclipse.core.resources` 3.23.0+, `org.eclipse.core.runtime` 3.34.0+, `org.eclipse.debug.core` 3.23.0+, `org.eclipse.debug.ui` 3.19.0+, `org.eclipse.equinox.app` 1.7.0+, `org.eclipse.jdt.core` 3.44.0+, `org.eclipse.jdt.debug` 3.25.0+, `org.eclipse.jdt.junit.core` 3.14.0+, `org.eclipse.jdt.launching` 3.24.0+, `org.eclipse.osgi` 3.24.0+, `org.eclipse.swt` 3.132.0+, `org.eclipse.text` 3.14.0+, `org.eclipse.ui.console` 3.15.0+, `org.eclipse.ui.workbench` 3.137.0+. The classpath resolves by bundle id and version range, so a pool must carry every floor listed.
-- **A bearer token**, in `ECLIPSE_MCP_TOKEN` or `%USERPROFILE%\.lunar\config.json`, set **before** Eclipse starts. The server refuses to bind without one.
+- **A bearer token**, in `ECLIPSE_MCP_TOKEN` or `%USERPROFILE%\.lunar\config.json`, set **before** Eclipse starts. At least 32 characters; the server refuses to bind without one, and refuses a shorter one. `lunar.ps1 setup` generates a 64-character one for you.
 
 ## Setup
 
@@ -97,7 +97,7 @@ Three settings, each with an environment variable and a config-file key, read **
 
 | Variable | Key | Default | Notes |
 | --- | --- | --- | --- |
-| `ECLIPSE_MCP_TOKEN` | `token` | none, **required** | Blank makes the server refuse to bind. |
+| `ECLIPSE_MCP_TOKEN` | `token` | none, **required** | Blank, or under 32 characters, makes the server refuse to bind. |
 | `LUNAR_MCP_HOST` | `host` | `127.0.0.1` | Must be loopback. A routable address is refused. |
 | `LUNAR_MCP_PORT` | `port` | `8124` | Not 1-65535 is ignored with an Error Log warning. Number or quoted string. |
 
@@ -319,6 +319,14 @@ Every step the scripts take has a hand equivalent. Write `%USERPROFILE%\.lunar\c
 }
 ```
 
+Fill `token` with at least 32 characters. To make one without `lunar.ps1`:
+
+```powershell
+$b = New-Object byte[] 32
+[System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b)
+$token = -join ($b | ForEach-Object { '{0:x2}' -f $_ })   # 64 hex characters
+```
+
 Publish the token to the **user** environment *before* Eclipse starts; a running Eclipse holds the old value, so every request is a `401` until it restarts. Then build, **stop Eclipse**, copy the five `com.github.lunar.*.jar` files into `<eclipse>\dropins`, and restart it.
 
 ## Removing it
@@ -353,6 +361,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\check-env.ps1
 `build.ps1` compiles everything with `javac --release 21`, runs four check classes (`SelfCheck`, `ProtocolCheck`, `FrameworkCheck`, `IntegrationCheck`) and fails on any compile error or check failure. It records jar paths, sizes and SHA-256 hashes in `build-state.json` and gates packaging on a check against the jars that were actually produced.
 
 `check-env.ps1` needs no Eclipse. Run it if you touched a script: it dot-sources `lunar.ps1`, exercises four of the five subcommands — all but `help` — against a temporary user profile with the environment accessors replaced, and asserts that the minimum versions in `build.ps1` still match what the bundle manifests declare, so the two cannot drift. It reads `build-state.json` and asserts it names five jars, so run `build.ps1` first or it fails on a fresh clone. Nothing it does writes to the registry or your real `%USERPROFILE%\.lunar`.
+
+CI does exactly this on a clean clone: [`.github/workflows/build.yml`](.github/workflows/build.yml) unpacks the Eclipse 4.38 SDK drop, builds with `-NoInstall`, then runs `check-env.ps1`, and fails the job if either fails. Report vulnerabilities per [SECURITY.md](SECURITY.md).
 
 ## License
 
