@@ -341,9 +341,22 @@ public final class RunTools implements ToolProvider {
         display.asyncExec(read);
         try {
             // Timed event waits provide prompt cancellation while the UI is busy; no sleep-based launch polling.
-            while (!read.isDone()) { budget.checkCancelled(); try { return read.get(Math.min(100,budget.remainingMs()),TimeUnit.MILLISECONDS); } catch (java.util.concurrent.TimeoutException pending) { } }
+            while (!read.isDone()) { budget.checkCancelled(); try { return read.get(Math.min(100,budget.remainingMs()),TimeUnit.MILLISECONDS); } catch (java.util.concurrent.TimeoutException pending) { } catch (java.util.concurrent.ExecutionException failed) { throw unwrap(failed); } }
             budget.checkCancelled(); return read.get();
         } finally { if (!read.isDone()) read.cancel(false); }
+    }
+    /**
+     * Hand back what a {@link FutureTask} body threw, rather than the wrapper.
+     *
+     * <p>The console fallback above runs on the UI thread, so its failures arrive wrapped in
+     * {@code ExecutionException}. {@code ToolRunner} classifies by {@code instanceof}, so left
+     * wrapped the two documented {@code invalid_range} signals collapsed to {@code tool_failed} and
+     * a cancellation was reported as a failure -- which a client that retries on {@code cancelled}
+     * never retries. An {@link Error} cause is rewrapped rather than smuggled through as an
+     * {@code Exception}, so this never narrows what the caller is told.
+     */
+    static Exception unwrap(java.util.concurrent.ExecutionException failed) {
+        return failed.getCause() instanceof Exception cause ? cause : new Exception(failed.getCause());
     }
     private static Map<String,Object> characterPage(String value,int offset,int limit,String source) {
         if (offset > value.length()) throw new RequestError("invalid_range", "offset exceeds current output length; reset offset");
@@ -446,6 +459,12 @@ public final class RunTools implements ToolProvider {
         if (!emoji.get("text").equals("\ud83d\ude42") || !emoji.get("nextOffset").equals(2)) throw new AssertionError("Console surrogate progression");
         try { characterPage("\ud83d\ude42",1,1,"check"); throw new AssertionError("Split console offset accepted"); }
         catch (RequestError expected) { }
+        // The console fallback runs on the UI thread, so everything it throws arrives wrapped, and
+        // ToolRunner classifies by instanceof. Assert the wrapper does not cost a client the code.
+        var wrapped = unwrap(new java.util.concurrent.ExecutionException(new RequestError("invalid_range","offset splits a character")));
+        if (!(wrapped instanceof RequestError code) || !"invalid_range".equals(code.code)) throw new AssertionError("a wrapped RequestError lost its code");
+        if (!(unwrap(new java.util.concurrent.ExecutionException(new OperationCanceledException())) instanceof OperationCanceledException)) throw new AssertionError("a wrapped cancellation is reported as a failure");
+        if (!(unwrap(new java.util.concurrent.ExecutionException(new StackOverflowError())).getCause() instanceof Error)) throw new AssertionError("an Error cause was dropped rather than kept as the cause");
         List<Tool> tools = new RunTools().tools();
         // A destructive tool that cannot be validated end to end is worse than an absent one.
         Tool deleter = tools.stream().filter(t -> t.spec().name().equals("delete_launch_config")).findFirst()
