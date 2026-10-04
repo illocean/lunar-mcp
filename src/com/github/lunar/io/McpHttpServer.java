@@ -279,19 +279,37 @@ public final class McpHttpServer {
             } catch (IOException ignored) {
                 // Client already gone; nothing useful left to report.
             }
+        } catch (InterruptedException interrupted) {
+            // toolSlots.tryAcquire is interruptible, and stop() calls pool.shutdownNow(), so a
+            // worker parked here is interrupted on shutdown. Clearing the flag -- which is what
+            // catching it as a plain Exception does -- returns that worker to the pool unable to
+            // see the shutdown it was just told about, and makes a clean shutdown look like a
+            // fault. ToolDispatcher:378 already gets this right for the same situation.
+            Thread.currentThread().interrupt();
+            internalError(ex, null);
         } catch (Exception e) {
             // handle() is the whole boundary, so nothing outside this method ever sees the
-            // throwable. Without this line a failed dispatch leaves no server-side record at
+            // throwable. Without a log line a failed dispatch leaves no server-side record at
             // all: the client gets a bare "internal error" and .metadata/.log holds the
             // workbench trace with no request id to correlate it against.
-            Platform.getLog(McpHttpServer.class).error("Lunar request dispatch failed", e);
-            try {
-                send(ex, 500, error("null", INTERNAL_ERROR, "internal error"));
-            } catch (IOException ignored) {
-                // Client already gone; nothing useful left to report.
-            }
+            internalError(ex, e);
         } finally {
             ex.close();
+        }
+    }
+
+    /**
+     * The last-resort 500. A null {@code cause} means the failure was expected rather than a fault
+     * -- an interrupt from {@code pool.shutdownNow()} during a clean stop -- so the client is
+     * answered but nothing is logged as an error, which would otherwise put one ERROR per
+     * in-flight request into the platform log on every normal shutdown.
+     */
+    private static void internalError(HttpExchange ex, Throwable cause) {
+        if (cause != null) Platform.getLog(McpHttpServer.class).error("Lunar request dispatch failed", cause);
+        try {
+            send(ex, 500, error("null", INTERNAL_ERROR, "internal error"));
+        } catch (IOException ignored) {
+            // Client already gone; nothing useful left to report.
         }
     }
 
