@@ -32,8 +32,19 @@ public record ToolSpec(
         }
     }
 
+    /**
+     * Declaration only; enforcement is the per-agent permission set a client generates from the
+     * verified tools/list inventory.
+     *
+     * <p>The tiers are ordered by what a call can do to the machine, not by how it edits files.
+     * {@link #EXECUTE} sits below {@link #MUTATE} because it is reversible, but it is above
+     * {@link #BUILD} because it runs the code under test: {@code launch} will start any main
+     * class in any project, including one that writes files, opens sockets or deletes things, and
+     * filing that as "builds the project" is how an agent ends up executing arbitrary code
+     * through a permission it was told was safe.
+     */
     public enum RiskTier {
-        READ, BUILD, MUTATE, DESTRUCTIVE;
+        READ, BUILD, EXECUTE, MUTATE, DESTRUCTIVE;
 
         static RiskTier parse(String raw) {
             if (raw == null) {

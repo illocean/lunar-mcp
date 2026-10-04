@@ -347,6 +347,7 @@ public final class WorkspaceTools implements ToolProvider {
             if (location.contains("..")) throw new RequestError("invalid_location", "location must not contain '..'");
             dir = java.nio.file.Path.of(location).toAbsolutePath().normalize();
             if (!Files.isDirectory(dir)) throw new RequestError("invalid_location", "location is not an existing directory: " + dir);
+            allowedRoot(dir);
             java.nio.file.Path marker = dir.resolve(".project");
             if (Files.exists(marker)) {
                 budget.checkCancelled();
@@ -403,6 +404,60 @@ public final class WorkspaceTools implements ToolProvider {
             "natures", List.of(p.getDescription().getNatureIds()));
     }
 
+    /**
+     * The roots a project may be created in, and the one check that enforces it.
+     *
+     * <p>Every file tool is sandboxed to "the project", so registering a directory as a project
+     * hands the caller that directory. Rejecting only the {@code ..} substring therefore let an
+     * agent register a parent of the workspace and then write or delete anywhere under it, which
+     * makes {@code confirm} on delete a typo guard and nothing more. The default is the workspace
+     * root itself; {@code -Dlunar.projectRoots=a;b} widens it, and an ancestor of the workspace or
+     * of the home directory is refused even when named, because a root that contains the workspace
+     * is a root that contains everything the agent already has.
+     *
+     * <p>Ponytail: the property is read per call so a changed value takes effect without a restart,
+     * which is cheap. Cache it if it ever shows up in a profile.
+     */
+    static void allowedRoot(java.nio.file.Path dir) throws Exception {
+        java.nio.file.Path workspaceRoot = workspace().getRoot().getLocation() == null ? null
+                : workspace().getRoot().getLocation().toFile().toPath().toRealPath();
+        java.nio.file.Path home = java.nio.file.Path.of(System.getProperty("user.home", "")).toRealPath();
+        List<java.nio.file.Path> roots = new ArrayList<>();
+        String configured = System.getProperty("lunar.projectRoots");
+        if (configured != null && !configured.isBlank()) {
+            for (String entry : configured.split("[;:]")) {
+                if (!entry.isBlank()) roots.add(java.nio.file.Path.of(entry.trim()).toRealPath());
+            }
+        }
+        if (roots.isEmpty() && workspaceRoot != null) roots.add(workspaceRoot);
+        bounded(dir.toRealPath(), roots, home, workspaceRoot);
+    }
+
+    /**
+     * The whole rule, with the roots handed in, so the self-check can assert it without an
+     * Eclipse workspace. Throws {@link RequestError} when {@code target} is not a legal location.
+     */
+    static void bounded(java.nio.file.Path target, List<java.nio.file.Path> roots,
+            java.nio.file.Path home, java.nio.file.Path workspaceRoot) {
+        for (java.nio.file.Path forbidden : List.of(workspaceRoot, home)) {
+            if (forbidden == null) continue;
+            // Only an ANCESTOR is refused. A project legitimately sits under the workspace, so
+            // testing the other direction would refuse every project that can be created at all.
+            if (target.equals(forbidden) || forbidden.startsWith(target)) {
+                throw new RequestError("location_not_allowed",
+                        "location contains an allowed project root and is refused: " + target
+                        + ". Projects may only be created under "
+                        + (workspaceRoot == null ? "the workspace" : workspaceRoot)
+                        + "; set -Dlunar.projectRoots to allow more.");
+            }
+        }
+        for (java.nio.file.Path root : roots) {
+            if (target.startsWith(root)) return;
+        }
+        throw new RequestError("location_not_allowed",
+                "location is outside every allowed project root: " + target);
+    }
+
     private Object deleteProject(Map<String, Object> args, CallBudget budget) throws Exception {
         String name = projectName(args);
         IProject p = workspace().getRoot().getProject(name);
@@ -412,20 +467,50 @@ public final class WorkspaceTools implements ToolProvider {
             throw new RequestError("confirm_required", "confirm must repeat the project name exactly: " + name);
         boolean deleteContent = Boolean.TRUE.equals(args.get("deleteContent"));
         java.nio.file.Path location = p.getLocation() == null ? null : p.getLocation().toFile().toPath();
+        // Removing the project first is what Eclipse itself does, and deleteRecursively is now
+        // safe on its own: it resolves every child against the project root, so it no longer
+        // needs contained(), which would be unusable here because the IProject is already gone.
         if (p.isOpen()) p.delete(false, true, budget.monitor()); else p.delete(false, false, budget.monitor());
         if (deleteContent && location != null && Files.exists(location))
             deleteRecursively(location, budget);
         return Map.of("project", name, "deleted", true, "contentDeleted", deleteContent);
     }
 
+    /**
+     * Delete a tree without ever walking out of it through a link.
+     *
+     * <p>{@code Files.isDirectory} follows links, and a Windows junction is the case that
+     * matters: it reports itself a directory even under {@link LinkOption#NOFOLLOW_LINKS} and
+     * {@code isSymbolicLink} is false for it, so neither flag identifies one. Resolving each
+     * child against the resolved root is the same ancestry test {@link #contained} applies to
+     * every other path in this class, and it makes a link a leaf: the link is deleted, its target
+     * is never entered. Ponytail ceiling: the resolved-root comparison, which is exact for
+     * symlinks and junctions alike -- a mount point is out of scope and would need the volume API.
+     */
     private static void deleteRecursively(java.nio.file.Path dir, CallBudget budget) throws Exception {
+        deleteRecursively(dir, dir.toRealPath(), budget);
+    }
+
+    private static void deleteRecursively(java.nio.file.Path dir, java.nio.file.Path root, CallBudget budget) throws Exception {
         try (var stream = Files.newDirectoryStream(dir)) {
             for (java.nio.file.Path child : stream) {
                 budget.checkCancelled();
-                if (Files.isDirectory(child)) deleteRecursively(child, budget); else Files.deleteIfExists(child);
+                if (Files.isDirectory(child, LinkOption.NOFOLLOW_LINKS) && within(child, root))
+                    deleteRecursively(child, root, budget);
+                else Files.deleteIfExists(child);
             }
         }
         Files.deleteIfExists(dir);
+    }
+
+    /** True when {@code candidate} really lives under {@code root}, links resolved. */
+    private static boolean within(java.nio.file.Path candidate, java.nio.file.Path root) {
+        try {
+            return candidate.toRealPath().startsWith(root);
+        } catch (java.io.IOException unreachable) {
+            // A link with no reachable target is a leaf by definition, so deleting it is safe.
+            return false;
+        }
     }
 
     @FunctionalInterface private interface FileVisitor { boolean visit(IFile file) throws Exception; }
@@ -861,7 +946,118 @@ public final class WorkspaceTools implements ToolProvider {
         // size, so a page at the full declared limit must still carry the key.
         if (!Map.of("nextOffset", 65536).containsKey("nextOffset")) throw new AssertionError("self-paging marker lost"); checked++;
         if (readEnd("a".repeat(70000), 0, 65536) != 65536) throw new AssertionError("declared limit is not honoured"); checked++;
+        checked += linkSafeDelete();
+        checked += projectRootIsBounded();
         return checked;
+    }
+
+    /**
+     * create_project must not be able to widen the sandbox every other file tool depends on.
+     * Asserts against the pure rule, so it needs no Eclipse workspace: a parent of the home
+     * directory is refused, and a location under a configured root is not, which is what keeps
+     * the guard from simply disabling the tool.
+     */
+    private static int projectRootIsBounded() throws Exception {
+        java.nio.file.Path home = java.nio.file.Path.of(System.getProperty("user.home", "")).toRealPath();
+        java.nio.file.Path workspaceRoot = Files.createTempDirectory("lunar-ws");
+        java.nio.file.Path elsewhere = Files.createTempDirectory("lunar-outside");
+        int checked = 0;
+        try {
+            // A parent of the home directory is the sharpest case: it holds every user file and
+            // is not the workspace, so nothing else in the tool chain would catch it.
+            java.nio.file.Path parent = home.getParent();
+            if (parent != null) {
+                try { bounded(parent, List.of(workspaceRoot), home, workspaceRoot);
+                    throw new AssertionError("a parent of the home directory was accepted as a project root"); }
+                catch (RequestError refused) { checked++; }
+            }
+            try { bounded(home, List.of(workspaceRoot), home, workspaceRoot);
+                throw new AssertionError("the home directory was accepted as a project root"); }
+            catch (RequestError refused) { checked++; }
+            // The workspace itself: a project there would BE the workspace.
+            try { bounded(workspaceRoot, List.of(workspaceRoot), home, workspaceRoot);
+                throw new AssertionError("the workspace root was accepted as a project location"); }
+            catch (RequestError refused) { checked++; }
+            // An unrelated sibling tree is refused on the allow-list, which is the check that
+            // actually stops a directory outside the workspace being adopted.
+            try { bounded(elsewhere, List.of(workspaceRoot), home, workspaceRoot);
+                throw new AssertionError("an unrelated directory was accepted as a project root"); }
+            catch (RequestError refused) { checked++; }
+            // Naming it explicitly is how an operator opts in, and that has to keep working.
+            bounded(elsewhere.resolve("child"), List.of(elsewhere), home, workspaceRoot);
+            checked++;
+            // And a project legitimately under the workspace is still allowed.
+            bounded(workspaceRoot.resolve("proj"), List.of(workspaceRoot), home, workspaceRoot);
+            checked++;
+        } finally {
+            deleteTree(workspaceRoot);
+            deleteTree(elsewhere);
+        }
+        return checked;
+    }
+
+    /**
+     * deleteRecursively must not walk through a link, or delete_project(deleteContent) erases
+     * whatever the link points at. Builds a real tree holding a junction that leaves the tree,
+     * deletes the tree, and asserts the tree is gone while the out-of-tree directory is intact.
+     *
+     * <p>A junction, not a symlink: {@code createSymbolicLink} needs a privilege the build agent
+     * does not have, and a junction is the thing Windows actually creates. That is also the case
+     * NOFOLLOW_LINKS does not catch, which is the whole point of the assertion.
+     */
+    private static int linkSafeDelete() throws Exception {
+        java.nio.file.Path root = Files.createTempDirectory("lunar-links");
+        java.nio.file.Path victim = root.resolve("outside");
+        java.nio.file.Path project = root.resolve("project");
+        java.nio.file.Path inside = project.resolve("real");
+        java.nio.file.Path link = project.resolve("escape");
+        Files.createDirectories(victim);
+        Files.createDirectories(inside);
+        java.nio.file.Path precious = victim.resolve("precious.txt");
+        Files.writeString(precious, "must survive");
+        Files.writeString(inside.resolve("owned.txt"), "may go");
+        int checked = 0;
+        try {
+            if (!mklink(victim, link)) return checked; // No links available here; nothing to assert.
+            deleteRecursively(project, new CallBudget(5_000));
+            if (!Files.exists(precious)) throw new AssertionError("delete followed a link out of the project"); checked++;
+            if (Files.exists(project, LinkOption.NOFOLLOW_LINKS)) throw new AssertionError("project tree was not deleted"); checked++;
+            if (Files.exists(link, LinkOption.NOFOLLOW_LINKS)) throw new AssertionError("the link itself must be deleted"); checked++;
+        } finally {
+            deleteTree(root);
+        }
+        return checked;
+    }
+
+    /**
+     * Junction first, symlink second: {@code mklink /J} needs no elevation and is what Explorer
+     * produces, while {@code createSymbolicLink} does. False means neither worked, so the caller
+     * skips rather than asserting on a tree that has no link in it.
+     */
+    private static boolean mklink(java.nio.file.Path target, java.nio.file.Path link) {
+        try {
+            Process p = new ProcessBuilder("cmd", "/c", "mklink", "/J", link.toString(), target.toString())
+                    .redirectErrorStream(true).start();
+            return p.waitFor() == 0 && Files.exists(link, LinkOption.NOFOLLOW_LINKS);
+        } catch (Exception notOnWindows) {
+            try {
+                Files.createSymbolicLink(link, target.toAbsolutePath());
+                return true;
+            } catch (Exception noLinks) {
+                return false;
+            }
+        }
+    }
+
+    /** Best-effort cleanup for the checks above: plain NIO, so it also removes a leftover link. */
+    private static void deleteTree(java.nio.file.Path dir) throws Exception {
+        if (!Files.exists(dir, LinkOption.NOFOLLOW_LINKS)) return;
+        if (Files.isDirectory(dir, LinkOption.NOFOLLOW_LINKS)) {
+            try (var stream = Files.newDirectoryStream(dir)) {
+                for (java.nio.file.Path child : stream) deleteTree(child);
+            }
+        }
+        Files.deleteIfExists(dir);
     }
     public static void main(String[] args) throws Exception { System.out.println("workspace checks: " + selfCheck()); }
 }

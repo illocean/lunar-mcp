@@ -82,10 +82,11 @@ public final class RunTools implements ToolProvider {
             tool("delete_launch_config", "Delete a launch configuration. Refuses unless confirm is the exact name.", DESTRUCTIVE,
                 object(Map.of("configuration", string(), "confirm", string()), "configuration", "confirm"),
                 this::deleteConfiguration),
-            tool("launch", "Build and launch an existing configuration", BUILD,
+            tool("launch", "Build and launch an existing configuration, which runs the program's main method",
+                EXECUTE,
                 object(Map.of("configuration", string(), "mode", Map.of("type", "string",
                     "enum", List.of("run", "debug"), "default", "run")), "configuration"),
-                (a,b) -> launchInfo(start(configuration(text(a,"configuration")), text(a,"mode"), b))),
+                (a,b) -> launchInfo(start(configuration(text(a,"configuration"), javaApplication()), text(a,"mode"), b))),
             tool("terminate", "Terminate a launch, including its debug targets", DESTRUCTIVE,
                 object(Map.of("launchId", string()), "launchId"), (a,b) -> {
                     ILaunch launch = launch(text(a,"launchId")); b.checkCancelled();
@@ -102,7 +103,7 @@ public final class RunTools implements ToolProvider {
             tool("get_log_entries", "Read a UTF-8 byte page of Eclipse's native log, preserving tracebacks", READ,
                 object(Map.of("offset", integer(0,0,Long.MAX_VALUE), "limit", integer(8192,4,65536))),
                 this::logEntries),
-            tool("run_tests", "Build and run an existing JUnit configuration; return native test results", BUILD,
+            tool("run_tests", "Run an existing JUnit configuration and return native test results. Runs the project's test code.", EXECUTE,
                 object(Map.of("configuration", string()), "configuration"), this::runTests)
         );
     }
@@ -186,16 +187,46 @@ public final class RunTools implements ToolProvider {
         return info;
     }
     private static ILaunchConfiguration configuration(String id) throws Exception {
+        return configuration(id, null);
+    }
+
+    /**
+     * @param allowedTypes configuration type ids the caller will accept, or null for any type.
+     *     Launching is code execution, and the type is what decides what actually runs, so a tool
+     *     that means to run a main method says so rather than letting a JUnit or Ant config
+     *     through the same argument.
+     */
+    private static ILaunchConfiguration configuration(String id, List<String> allowedTypes) throws Exception {
         ILaunchConfiguration found = null;
         for (ILaunchConfiguration c : manager().getLaunchConfigurations()) {
-            if (c.getMemento().equals(id)) return c;
+            if (c.getMemento().equals(id)) return checked(c, allowedTypes);
             if (c.getName().equals(id)) {
                 if (found != null) throw new RequestError("configuration_ambiguous", "Ambiguous configuration name; use id from list_launch_configs");
                 found = c;
             }
         }
         if (found == null) throw new RequestError("configuration_missing", "No launch configuration matches; call list_launch_configs");
-        return found;
+        return checked(found, allowedTypes);
+    }
+
+    /** The one configuration type {@code launch} will start; JUnit has its own tool. */
+    private static List<String> javaApplication() {
+        return List.of(IJavaLaunchConfigurationConstants.ID_JAVA_APPLICATION);
+    }
+
+    private static ILaunchConfiguration checked(ILaunchConfiguration c, List<String> allowedTypes) throws Exception {
+        if (allowedTypes == null) return c;
+        String type = c.getType().getIdentifier();
+        if (!typeAllowed(type, allowedTypes))
+            throw new RequestError("configuration_type_not_allowed",
+                    "launch accepts only " + allowedTypes + " configurations; this one is "
+                    + type + ". Use run_tests for a JUnit configuration.");
+        return c;
+    }
+
+    /** Pure half of {@link #checked}: what the filter accepts, testable without a launch manager. */
+    static boolean typeAllowed(String type, List<String> allowedTypes) {
+        return allowedTypes == null || allowedTypes.contains(type);
     }
     private Object createConfiguration(Map<String,Object> args,CallBudget budget) throws Exception {
         String name = text(args,"name"), projectName = text(args,"project"), mainType = text(args,"mainType");
@@ -421,5 +452,23 @@ public final class RunTools implements ToolProvider {
             .orElseThrow(() -> new AssertionError("delete_launch_config missing"));
         Object required = deleter.spec().inputSchema().get("required");
         if (!(required instanceof List<?> r) || !r.contains("confirm")) throw new AssertionError("delete_launch_config is not confirm-gated");
+        // Running a project's main method and running its tests both execute code the workspace
+        // never compiled here. Tiering them as BUILD understates what the caller approved, so a
+        // BUILD-only auto-approve list would wave them through.
+        for (String name : List.of("launch", "run_tests")) {
+            ToolSpec.RiskTier tier = tools.stream().filter(t -> t.spec().name().equals(name))
+                    .findFirst().orElseThrow(() -> new AssertionError(name + " missing")).spec().riskTier();
+            if (tier == ToolSpec.RiskTier.BUILD || tier.compareTo(ToolSpec.RiskTier.EXECUTE) < 0)
+                throw new AssertionError(name + " is tiered " + tier + "; running code must be at least EXECUTE");
+        }
+        // The tier is only half the fix: launch must also refuse a config that is not a Java
+        // application, or a JUnit/Ant config still executes through the same argument.
+        if (!typeAllowed(IJavaLaunchConfigurationConstants.ID_JAVA_APPLICATION, javaApplication()))
+            throw new AssertionError("launch no longer accepts a Java application config");
+        for (String rejected : List.of(IJavaLaunchConfigurationConstants.ID_JUNIT_TEST,
+                "org.eclipse.ant.core.antBuilder", "org.eclipse.pde.ui.RuntimeWorkbench")) {
+            if (typeAllowed(rejected, javaApplication()))
+                throw new AssertionError("launch accepts a " + rejected + " configuration");
+        }
     }
 }

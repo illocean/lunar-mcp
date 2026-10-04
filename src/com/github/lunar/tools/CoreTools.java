@@ -26,7 +26,6 @@ public final class CoreTools implements ToolProvider {
             "project_info", "list_files", "read_file", "search_text", "get_problems",
             "build_project", "wait_until_quiet", "list_launch_configs", "launch", "get_console_output");
     private static final int RETAIN_BYTES = 2 * 1024 * 1024;
-    private static final long SESSION_BYTES = 8L * 1024 * 1024;
     private static final AtomicLong generation = new AtomicLong();
     private static final IResourceChangeListener listener = event -> generation.incrementAndGet();
     public record Baseline(String tool, Map<String, Object> arguments, Object data, String hash) { }
@@ -37,9 +36,10 @@ public final class CoreTools implements ToolProvider {
     public static void stop() {
         ResourcesPlugin.getWorkspace().removeResourceChangeListener(listener);
     }
+    /** Charges the trailing window instead of a lifetime total: a long-lived session must not be
+     *  starved by output it emitted an hour ago, but a burst inside the window must still stop. */
     static boolean reserveOutput(ToolDispatcher.Session s,int bytes){
-        long used;do{used=s.emittedBytes.get();if(used>SESSION_BYTES-bytes)return false;}
-        while(!s.emittedBytes.compareAndSet(used,used+bytes));return true;
+        return s.charge(bytes) <= ToolDispatcher.WINDOW_BYTES;
     }
     static String group(Tool tool) {
         String name = tool.getClass().getName();
@@ -87,7 +87,7 @@ public final class CoreTools implements ToolProvider {
                 Map.of(), (a,b) -> {
                     var s = ToolDispatcher.sessionFor(b.sessionId());
                     return Map.of("sessionId",s.id(),"toolCalls",s.toolCalls(),"loaded",s.loaded.stream().sorted().toList(),
-                            "remainingOutputBytes", Math.max(0, SESSION_BYTES-s.emittedBytes.get()),
+                            "remainingOutputBytes", Math.max(0, ToolDispatcher.WINDOW_BYTES-s.windowedBytes()),
                             "workspaceGeneration",generation.get(),"activeRequests",ToolDispatcher.activeRequests(b.sessionId()));
                 }),
             tool("resume_result", "Read a retained JSON result by character offset; cursors belong to this session.",
@@ -262,6 +262,17 @@ public final class CoreTools implements ToolProvider {
         assert failed.meta().truncated()&&bytes(ToolDispatcher.encodeResult(failed,s.id))<=1024;
         Map<String,Object> nullValue=new LinkedHashMap<>();nullValue.put("added",null);
         assert !delta(Map.of(),nullValue).equals(Map.of());
+        // The output budget is a trailing window, not a lifetime total: a session that once blew
+        // past the ceiling used to be refused forever, which pushed clients to burn a fresh
+        // session per task and left the long-lived ones idle. Ageing buckets out is the fix, so
+        // check that a full window decays and that a live burst is still refused.
+        var windowed=new ToolDispatcher.Session("window-check");
+        while(reserveOutput(windowed,(int)(ToolDispatcher.WINDOW_BYTES/1024))) ;
+        assert !reserveOutput(windowed,1024);
+        windowed.expireWindow();
+        assert windowed.windowedBytes()==0&&reserveOutput(windowed,1024);
+        // And the ceiling itself must not have been silently raised along the way.
+        assert ToolDispatcher.WINDOW_BYTES==8L*1024*1024;
         System.out.println("CORE CHECK PASS");
     }
 }

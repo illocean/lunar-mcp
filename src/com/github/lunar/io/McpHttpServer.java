@@ -122,6 +122,8 @@ public final class McpHttpServer {
     }
 
     private void handle(HttpExchange ex, String contextPath) {
+        // Hoisted so the catch can name the request it is answering.
+        Json.Request req = null;
         try {
             // Authentication precedes reading the body and reaching any method handler.
             if (!bearerMatches(ex.getRequestHeaders().getFirst("Authorization"), token)) {
@@ -191,7 +193,7 @@ public final class McpHttpServer {
                 send(ex, 400, error("null", PARSE_ERROR, "request body must be valid UTF-8"));
                 return;
             }
-            Json.Request req = Json.request(body);
+            req = Json.request(body);
             if (req == null) {
                 int code = INVALID_REQUEST;
                 try { Json.parse(body); } catch (RuntimeException malformed) { code = PARSE_ERROR; }
@@ -263,6 +265,16 @@ public final class McpHttpServer {
                 }
             } finally {
                 if (toolCall) toolSlots.release();
+            }
+        } catch (RequestError refused) {
+            // A refusal the client can act on -- expired session, capacity, bad range -- is not a
+            // server fault, and answering 500 told the caller to retry a request that can never
+            // succeed while hiding the reason. Carries the stable code so callers can branch.
+            try {
+                send(ex, 200, error(req == null ? "null" : req.id, INVALID_REQUEST,
+                        refused.code + ": " + refused.getMessage()));
+            } catch (IOException ignored) {
+                // Client already gone; nothing useful left to report.
             }
         } catch (Exception e) {
             try {

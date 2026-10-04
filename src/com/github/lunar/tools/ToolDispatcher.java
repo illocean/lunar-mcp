@@ -22,35 +22,146 @@ public final class ToolDispatcher {
     private static final Map<String, CallBudget> ACTIVE = new ConcurrentHashMap<>();
     private static final java.util.concurrent.Semaphore MUTATIONS = new java.util.concurrent.Semaphore(1,true);
 
+    /**
+     * Sessions are reclaimed after this much idle time.
+     *
+     * <p>The cap of 64 was the only bound, so an abandoned session -- a client that crashed, or an
+     * agent that opened one per task and never closed it -- held a slot until the cap was hit and
+     * then every later session was refused. Each session is small, but "small times 64" is not a
+     * policy: it makes the lifetime of a leaked session the problem of whoever leaked the 65th.
+     * An idle TTL reclaims them without the client having to be well behaved, and anything
+     * genuinely in flight is never touched because {@link #sessionFor} refreshes lastSeen.
+     */
+    private static final long SESSION_IDLE_NANOS = java.util.concurrent.TimeUnit.MINUTES.toNanos(30);
+
+    /** The id used when a client sends no Mcp-Session-Id header; never evicted, always exactly one. */
+    private static final String IMPLICIT = "implicit";
+
+    /** Output a session may emit inside its trailing window. Same magnitude as the lifetime cap it
+     *  replaces, but decaying, so an old busy hour stops counting against today's work. */
+    static final long WINDOW_BYTES = 8L * 1024 * 1024;
+
+    /** Window clock, a seam so a check can age a window without sleeping for an hour. */
+    private static volatile java.util.function.LongSupplier windowClock = System::currentTimeMillis;
+    static long now() { return windowClock.getAsLong(); }
+    static void ageWindow(java.util.function.LongSupplier clock) { windowClock = clock; }
+
     private ToolDispatcher() {
     }
 
-    /** Per-session bookkeeping. Deliberately tiny: P2 has nothing to store yet, and inventing a
-     * slot for future state would be scaffolding for a caller that does not exist. */
+    /**
+     * Drop sessions idle past the TTL. Called from every entry point that reads SESSIONS, so
+     * reclamation costs no timer and no thread; a server nobody is talking to holds nothing stale
+     * because nothing is running to hold it.
+     *
+     * @return how many sessions were evicted
+     */
+    static int evictIdleSessions() {
+        long now = System.nanoTime();
+        int evicted = 0;
+        for (java.util.Map.Entry<String, Session> entry : SESSIONS.entrySet()) {
+            Session s = entry.getValue();
+            if (s.id.equals(IMPLICIT)) continue;
+            if (now - s.lastSeen < SESSION_IDLE_NANOS) continue;
+            // Compare-and-remove against the same instance: a session that was just refreshed by
+            // a request in flight must not be deleted out from under it.
+            if (!SESSIONS.remove(entry.getKey(), s)) continue;
+            s.closed = true;
+            ACTIVE.forEach((key, budget) -> { if (key.startsWith(s.id + "\n")) budget.cancel(); });
+            evicted++;
+        }
+        return evicted;
+    }
+
+    /**
+     * Per-session bookkeeping.
+     *
+     * <p>The output budget is a sliding window, not a lifetime total. A lifetime cap punishes a
+     * long-lived session for work it did an hour ago and then refuses the session outright, so a
+     * client is pushed to burn a fresh session per task and the sessions that keep living are the
+     * idle ones. A window bounds the rate, which is the thing that can actually exhaust memory,
+     * and lets a busy session keep working once its earlier output has aged out.
+     */
     public static final class Session {
+        /** One bucket per minute; the window is WINDOW_BUCKETS of them. */
+        private static final int WINDOW_BUCKETS = 60;
         final String id;
         final AtomicLong toolCalls = new AtomicLong();
         final AtomicLong emittedBytes = new AtomicLong();
         final Set<String> loaded = ConcurrentHashMap.newKeySet();
         final Map<String, String> cursors = new LinkedHashMap<>();
         final Map<String, CoreTools.Baseline> baselines = new LinkedHashMap<>();
+        final long[] windowMinutes = new long[WINDOW_BUCKETS];
+        final AtomicLong[] windowBytes = new AtomicLong[WINDOW_BUCKETS];
+        volatile long lastSeen = System.nanoTime();
         volatile boolean closed;
-        Session(String id) { this.id = id; }
+        Session(String id) {
+            this.id = id;
+            for (int i = 0; i < WINDOW_BUCKETS; i++) windowBytes[i] = new AtomicLong();
+        }
         public String id() { return id; }
         public long toolCalls() { return toolCalls.get(); }
+
+        /**
+         * Charge {@code bytes} against the trailing one-hour window and report the total still
+         * inside it, expiring buckets as they age past the window.
+         */
+        synchronized long charge(long bytes) {
+            long bucket = now() / 60_000L;
+            long total = 0;
+            for (int i = 0; i < WINDOW_BUCKETS; i++) {
+                // A bucket from an hour or more ago is out of the window; so is any bucket older
+                // than the newest one we hold, which is the wraparound case within the hour.
+                if (windowMinutes[i] < bucket - WINDOW_BUCKETS + 1 || windowMinutes[i] > bucket) {
+                    windowMinutes[i] = 0;
+                    windowBytes[i].set(0);
+                }
+                total += windowBytes[i].get();
+            }
+            int slot = (int) Math.floorMod(bucket, WINDOW_BUCKETS);
+            if (windowMinutes[slot] != bucket) { windowMinutes[slot] = bucket; windowBytes[slot].set(0); }
+            // Count what was just charged, or the cap is soft by exactly one response.
+            total += windowBytes[slot].addAndGet(bytes);
+            emittedBytes.addAndGet(bytes);
+            return total;
+        }
+
+        /** Bytes charged inside the trailing window, without charging anything new. */
+        synchronized long windowedBytes() {
+            long bucket = now() / 60_000L;
+            long total = 0;
+            for (int i = 0; i < WINDOW_BUCKETS; i++) {
+                if (windowMinutes[i] < bucket - WINDOW_BUCKETS + 1 || windowMinutes[i] > bucket) continue;
+                total += windowBytes[i].get();
+            }
+            return total;
+        }
+
+        
     }
 
     public static Session sessionFor(String header) {
-        String id = header == null || header.isBlank() ? "implicit" : header.trim();
-        if (id.equals("implicit")) return SESSIONS.computeIfAbsent(id, Session::new);
-        Session existing = SESSIONS.get(id);
-        if (existing == null || existing.closed) throw new RequestError("session_unavailable","unknown MCP session");
-        return existing;
+        evictIdleSessions();
+        String id = header == null || header.isBlank() ? IMPLICIT : header.trim();
+        Session s = id.equals(IMPLICIT) ? SESSIONS.computeIfAbsent(id, Session::new) : SESSIONS.get(id);
+        if (s == null || s.closed)
+            throw new RequestError("session_unavailable", "unknown or expired MCP session; initialize again");
+        s.lastSeen = System.nanoTime();
+        return s;
     }
 
 
     public static String createSession() {
         synchronized (SESSIONS) {
+            // Reclaim before refusing: the cap is a backstop for a burst, not a way to make leaked
+            // sessions permanent, and evicting here is what stops an idle-but-full server from
+            // rejecting every initialize from then on.
+            SESSIONS.values().removeIf(s -> {
+                boolean idle = !s.id.equals(IMPLICIT)
+                        && System.nanoTime() - s.lastSeen >= SESSION_IDLE_NANOS;
+                if (idle) s.closed = true;
+                return idle;
+            });
             if (SESSIONS.size() >= 64) {
                 throw new RequestError("session_capacity_reached","session capacity reached; DELETE an unused session");
             }
@@ -75,7 +186,7 @@ public final class ToolDispatcher {
     }
 
     public static void cancel(String session, String requestId) {
-        CallBudget budget = ACTIVE.get((session == null ? "implicit" : session) + "\n"
+        CallBudget budget = ACTIVE.get((session == null ? IMPLICIT : session) + "\n"
                 + canonicalId(requestId));
         if (budget != null) budget.cancel();
     }

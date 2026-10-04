@@ -62,8 +62,16 @@ $classesDir = Join-Path $outputDir 'classes'
 New-Item -ItemType Directory -Path $classesDir -Force | Out-Null
 $sources = @(Get-ChildItem -LiteralPath (Join-Path $lunarRoot 'src') -Filter '*.java' -Recurse | ForEach-Object FullName)
 if ($sources.Count -eq 0) { throw 'No Lunar sources' }
+# javac writes deprecation/unchecked Notes to stderr. PowerShell 5.1 turns native stderr into an
+# error record, and ErrorActionPreference=Stop makes that terminating, so a clean compile was
+# reported as a failure. Relax the preference for the duration of the call; the exit code below is
+# the real verdict, and a genuine javac error still fails the build.
+$strict = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
 & javac --release 21 -encoding UTF-8 -cp $classPath -d $classesDir @sources
-if ($LASTEXITCODE -ne 0) { throw 'Lunar compilation failed' }
+$compileExit = $LASTEXITCODE
+$ErrorActionPreference = $strict
+if ($compileExit -ne 0) { throw 'Lunar compilation failed' }
 $sourceDir = Join-Path $lunarRoot 'src'
 $artifacts = @()
 $classFiles = @(Get-ChildItem -LiteralPath $classesDir -Filter '*.class' -Recurse)
@@ -134,6 +142,10 @@ foreach ($classFile in @(Get-ChildItem -LiteralPath $classesDir -Filter '*.class
 }
 $checkPath = ((@($checksDir) + $artifacts) -join ';') + ';' + $classPath
 $ioArtifact = $artifacts | Where-Object { $_ -like '*com.github.lunar.io_*.jar' }
+# Same stderr problem as javac: the checks log progress to stderr, which PowerShell 5.1 turns into
+# a terminating error under Stop. Each call below already gates on $LASTEXITCODE, which is the
+# authoritative verdict, so the preference is relaxed only for the duration of the suite.
+$ErrorActionPreference = 'Continue'
 & java -ea -cp $checkPath com.github.lunar.SelfCheck $ioArtifact
 if ($LASTEXITCODE -ne 0) { throw 'Lunar lifecycle check failed' }
 & java -ea -cp $checkPath com.github.lunar.io.ProtocolCheck
@@ -142,6 +154,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Lunar protocol check failed' }
 if ($LASTEXITCODE -ne 0) { throw 'Lunar framework check failed' }
 & java -ea -cp $checkPath com.github.lunar.IntegrationCheck @artifacts
 if ($LASTEXITCODE -ne 0) { throw 'Lunar domain integration check failed' }
+$ErrorActionPreference = 'Stop'
 if ($Install -and $NoInstall) { throw 'Choose -Install or -NoInstall, not both' }
 if ($Install -and $InstallP2) {
     throw @'
