@@ -153,12 +153,16 @@ try {
     if ($listed.Status -ne 200) { throw "tools/list returned HTTP $($listed.Status)" }
     $parsed = $listed.Body | ConvertFrom-Json
     $tools = @($parsed.result.tools)
-    if ($tools.Count -ne 18) { throw "expected 18 tools visible at start, got $($tools.Count)" }
+    # 17 is published in the README (diagram, tools table, curl example) and IntegrationCheck pins
+    # it too, so it has four homes and this is the one that got left behind last time. Worth
+    # asserting here anyway: IntegrationCheck injects a registry, and only this boots the real
+    # plugins, so it is the only check that sees what OSGi actually offers.
+    if ($tools.Count -ne 17) { throw "expected 17 tools visible at start, got $($tools.Count)" }
 
     $refused = Invoke-Mcp $target @{ 'Accept' = $accept } '{"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}}'
     if ($refused.Status -ne 401) { throw "an unauthenticated tools/list returned HTTP $($refused.Status), expected 401" }
 
-    Write-Host "SMOKE PASS: 18 tools live at $target, unauthenticated call refused with 401"
+    Write-Host "SMOKE PASS: 17 tools live at $target, unauthenticated call refused with 401"
 }
 catch {
     Write-Host "SMOKE FAIL: $_"
