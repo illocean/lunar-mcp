@@ -421,8 +421,30 @@ public final class WorkspaceTools implements ToolProvider {
                 : workspace().getRoot().getLocation().toFile().toPath().toRealPath();
         java.nio.file.Path home = java.nio.file.Path.of(System.getProperty("user.home", "")).toRealPath();
         List<java.nio.file.Path> roots = configuredRoots(System.getProperty("lunar.projectRoots"));
+        refuseAncestorRoots(roots, home, workspaceRoot);
         if (roots.isEmpty() && workspaceRoot != null) roots.add(workspaceRoot);
         bounded(dir.toRealPath(), roots, home, workspaceRoot);
+    }
+
+    /**
+     * A configured root that is, or contains, the workspace or the home directory is the opposite
+     * of a sandbox: it hands the agent every file it already has, plus everything else. The
+     * per-target check in {@link #bounded} refuses an ancestor *location*, so a root that was
+     * itself an ancestor was never caught, and {@code -Dlunar.projectRoots=C:\} would have handed
+     * over the whole drive. Checked on the roots, before the workspace default is appended, so
+     * the default is not refused against itself.
+     */
+    static void refuseAncestorRoots(List<java.nio.file.Path> roots, java.nio.file.Path home,
+            java.nio.file.Path workspaceRoot) {
+        for (java.nio.file.Path root : roots)
+            for (java.nio.file.Path forbidden : List.of(workspaceRoot, home)) {
+                if (forbidden == null) continue;
+                if (forbidden.equals(root) || forbidden.startsWith(root))
+                    throw new RequestError("location_not_allowed",
+                            "an allowed project root is the workspace or the home directory, or an"
+                            + " ancestor of either, and is refused: " + root
+                            + ". Name a directory below it instead.");
+            }
     }
 
     /**
@@ -1030,6 +1052,26 @@ public final class WorkspaceTools implements ToolProvider {
                     throw new AssertionError("the refusal does not name the entry: " + refused.getMessage());
                 checked++;
             }
+            // A root that is, or contains, the home directory or the workspace is the opposite of
+            // a sandbox. bounded() only ever compared a root as a containment target, so naming an
+            // ancestor used to hand the agent the whole drive, and projectRoots never worked on
+            // Windows to do it until the separator was fixed. Four shapes: home itself, the
+            // workspace itself, an ancestor of home, and an ancestor of the workspace.
+            java.nio.file.Path above = home.getParent() == null ? null : home.getParent().getParent();
+            for (java.nio.file.Path root : java.util.List.of(home, workspaceRoot,
+                    above == null ? home : above, workspaceRoot.getParent())) {
+                try {
+                    refuseAncestorRoots(List.of(root), home, workspaceRoot);
+                    throw new AssertionError("an ancestor-or-self project root was accepted: " + root);
+                } catch (RequestError refused) {
+                    if (!refused.getMessage().contains(root.toString()))
+                        throw new AssertionError("the refusal does not name the root: " + refused.getMessage());
+                    checked++;
+                }
+            }
+            // A root strictly below home stays legal: naming ~/code is the ordinary case.
+            refuseAncestorRoots(List.of(home.resolve("code")), home, workspaceRoot);
+            checked++;
         } finally {
             deleteTree(workspaceRoot);
             deleteTree(elsewhere);
