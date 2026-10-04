@@ -82,7 +82,11 @@ public final class ProtocolCheck {
                             + "\"name\":\"load_toolset\",\"arguments\":{\"name\":\"invalid\"}}}",
                     "Mcp-Session-Id", session);
             assert failedLoad.headers().firstValue("Content-Type").orElse("").equals("application/json");
-            checkWindowBillsEmittedBytes(client, uri, session);
+            withCoreTools(() -> {
+                checkRefusalCarriesAStableCode(client, uri, session);
+                checkWindowBillsEmittedBytes(client, uri, session);
+                return null;
+            });
             checkCanonicalCancellation(client, uri, session);
             HttpRequest deleted = HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(10))
                     .header("Authorization", "Bearer check-token").header("Mcp-Session-Id", session)
@@ -110,11 +114,15 @@ public final class ProtocolCheck {
      * Asserted over the wire because the charge happens in the dispatcher's {@code finally}
      * block, so a unit check of the helper would never have reached the bug.
      */
-    private static void checkWindowBillsEmittedBytes(HttpClient client, URI uri, String session)
-            throws Exception {
-        // The registry is empty outside OSGi, so the real core tools are injected. Only
-        // get_session_info is called, and it reads the dispatcher's own accounting rather than
-        // anything Eclipse owns, which is why this check needs no workspace.
+    /**
+     * Run {@code body} with the real core tools registered.
+     *
+     * <p>The registry is empty outside OSgi, so the cancellation check installs a stub instead.
+     * These two need the real ones: the refusal check has to raise a genuine {@code RequestError}
+     * and the window check has to read the dispatcher's own accounting. Only tools that read no
+     * Eclipse state are called, so no workspace is needed.
+     */
+    private static void withCoreTools(java.util.concurrent.Callable<Void> body) throws Exception {
         Map<String, Tool> previous = ToolRegistry.all();
         var install = ToolRegistry.class.getDeclaredMethod("installForTest", Map.class);
         install.setAccessible(true);
@@ -122,15 +130,46 @@ public final class ProtocolCheck {
         for (Tool tool : new CoreTools().tools()) core.put(tool.spec().name(), tool);
         install.invoke(null, core);
         try {
-            long before = remainingOutputBytes(sessionInfo(client, uri, session, 20));
-            for (int i = 0; i < 20; i++) sessionInfo(client, uri, session, 100 + i);
-            long spent = before - remainingOutputBytes(sessionInfo(client, uri, session, 21));
-            assert spent < 64 * 1024
-                    : "20 small calls spent " + spent
-                    + " bytes of the output window, so the window is billing reservations";
+            body.call();
         } finally {
             install.invoke(null, previous);
         }
+    }
+
+    /**
+     * A transport refusal has to carry a code a client can branch on.
+     *
+     * <p>The capacity refusal was packed into the message string under the generic -32600, so a
+     * client could only grep prose to learn why it had been refused. JSON-RPC gives an error a
+     * {@code data} member for exactly that. This drives the real 64-session ceiling the way a
+     * leaking client would, because {@code createSession} throws outside {@code ToolRunner} --
+     * the only refusals that reach the transport's own catch are ones no tool raised.
+     */
+    private static void checkRefusalCarriesAStableCode(HttpClient client, URI uri, String session)
+            throws Exception {
+        Map<?, ?> error = null;
+        for (int i = 0; i < 200 && error == null; i++) {
+            Map<?, ?> reply = (Map<?, ?>) Json.parse(send(client, uri,
+                    "{\"jsonrpc\":\"2.0\",\"id\":" + (40 + i) + ",\"method\":\"initialize\",\"params\":{"
+                            + "\"protocolVersion\":\"unsupported-client-version\",\"capabilities\":{},"
+                            + "\"clientInfo\":{\"name\":\"ProtocolCheck\",\"version\":\"1\"}}}").body());
+            error = (Map<?, ?>) reply.get("error");
+        }
+        assert error != null : "200 initialize calls never reached the session ceiling";
+        assert error.containsKey("data") : "refusal carries no error.data: " + error;
+        assert "session_capacity_reached".equals(((Map<?, ?>) error.get("data")).get("code"));
+        assert !error.get("message").toString().contains("session_capacity_reached")
+                : "the code is still packed into the message as well as into the data";
+    }
+
+    private static void checkWindowBillsEmittedBytes(HttpClient client, URI uri, String session)
+            throws Exception {
+        long before = remainingOutputBytes(sessionInfo(client, uri, session, 20));
+        for (int i = 0; i < 20; i++) sessionInfo(client, uri, session, 100 + i);
+        long spent = before - remainingOutputBytes(sessionInfo(client, uri, session, 21));
+        assert spent < 64 * 1024
+                : "20 small calls spent " + spent
+                + " bytes of the output window, so the window is billing reservations";
     }
 
     private static HttpResponse<String> sessionInfo(HttpClient client, URI uri, String session, int id)

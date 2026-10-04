@@ -293,6 +293,19 @@ public final class CoreTools implements ToolProvider {
         } finally {
             ToolDispatcher.ageWindow(System::currentTimeMillis);
         }
+        // An expired session must be answered with 404, not a 200-wrapped JSON-RPC error. The
+        // transport decides that on hasSession, and hasSession was the one entry point that
+        // never evicted, so it agreed the session was live while sessionFor evicted it and
+        // threw -- the client saw 200 then 404 for the same id and could not recover. lastSeen
+        // is package-private, so the check ages the clock without adding a seam for it.
+        String staleId=ToolDispatcher.createSession();
+        ToolDispatcher.Session stale=ToolDispatcher.sessionFor(staleId);
+        stale.lastSeen=System.nanoTime()-java.util.concurrent.TimeUnit.MINUTES.toNanos(31);
+        if(ToolDispatcher.hasSession(staleId))
+            throw new AssertionError("hasSession reports an idle-expired session as live, so the transport will not 404 it");
+        if(ToolDispatcher.evictIdleSessions()!=0)
+            throw new AssertionError("hasSession did not evict the expired session itself");
+        ToolDispatcher.deleteSession(staleId);
         // And the ceiling itself must not have been silently raised along the way.
         assert ToolDispatcher.WINDOW_BYTES==8L*1024*1024;
         System.out.println("CORE CHECK PASS");

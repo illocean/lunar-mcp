@@ -174,6 +174,12 @@ public final class ToolDispatcher {
     }
 
     public static boolean hasSession(String id) {
+        // Evict first, or this disagrees with sessionFor. sessionFor evicts before it looks the
+        // session up, so a client whose session had just expired was told here that the session was
+        // live, then had the 200 answer replaced by a JSON-RPC error, and only the *next* request
+        // got the 404 the transport spec requires. That split left a 200 the client would act on
+        // and a 404 it would recover from, in the wrong order.
+        evictIdleSessions();
         return id == null || SESSIONS.containsKey(id);
     }
 

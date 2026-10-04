@@ -270,10 +270,11 @@ public final class McpHttpServer {
         } catch (RequestError refused) {
             // A refusal the client can act on -- expired session, capacity, bad range -- is not a
             // server fault, and answering 500 told the caller to retry a request that can never
-            // succeed while hiding the reason. Carries the stable code so callers can branch.
+            // succeed while hiding the reason. The stable code rides in error.data where a client
+            // can branch on it; the message stays prose a human can read.
             try {
                 send(ex, 200, error(req == null ? "null" : req.id, INVALID_REQUEST,
-                        refused.code + ": " + refused.getMessage()));
+                        refused.getMessage(), Json.obj("code", Json.quote(refused.code))));
             } catch (IOException ignored) {
                 // Client already gone; nothing useful left to report.
             }
@@ -338,8 +339,20 @@ public final class McpHttpServer {
     }
 
     private static String error(String id, int code, String message) {
+        return error(id, code, message, null);
+    }
+
+    /**
+     * JSON-RPC 2.0 gives an error a {@code data} member for structured detail, and that is where a
+     * stable code belongs. A code concatenated onto the message -- {@code "session_capacity_reached:
+     * ..."} under the generic -32600 -- left a client grepping prose to learn why it had been
+     * refused, which is the one thing it needed to branch on.
+     */
+    private static String error(String id, int code, String message, String data) {
         return Json.obj("jsonrpc", Json.quote("2.0"), "id", id, "error",
-                Json.obj("code", Integer.toString(code), "message", Json.quote(message)));
+                data == null ? Json.obj("code", Integer.toString(code), "message", Json.quote(message))
+                        : Json.obj("code", Integer.toString(code), "message", Json.quote(message),
+                                "data", data));
     }
 
     /** Ordinary calls use JSON; successful catalog changes may use a finite POST SSE response. */
