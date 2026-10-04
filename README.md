@@ -303,9 +303,11 @@ a deny list built from `x-lunar-risk-tier`:
 
 Two things do not follow from the tier alone. `create_launch_config` is `mutate`
 because it writes a file, but a launch configuration is how an agent gets code
-to run, so a Reader has to name it. And `execute` is exactly `launch` and
-`run_tests` — neither is visible at session start, so a profile that never calls
-`load_toolset("run")` cannot reach either one.
+to run, so a Reader has to name it. And `execute` is exactly the six tools that
+run code the workspace did not compile here — `launch`, `run_tests` and the four
+debug controls — none of which is visible at session start, so a profile that
+never calls `load_toolset("run")` or `load_toolset("debug")` cannot reach any
+of them.
 
 **Every schema carries a risk tier**, readable from `tools/list` before any call
 runs.

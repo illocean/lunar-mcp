@@ -9,6 +9,7 @@ import com.github.lunar.tools.Tool;
 import com.github.lunar.tools.ToolDispatcher;
 import com.github.lunar.tools.ToolRegistry;
 import com.github.lunar.tools.ToolRunner;
+import com.github.lunar.tools.ToolSpec;
 import com.github.lunar.workspace.WorkspaceTools;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -59,7 +60,27 @@ public final class IntegrationCheck {
             }
         }
         checkSessionStartOffersNoExecution(tools);
+        checkDebugControlToolsAreExecuteTiered(tools);
         System.out.println("INTEGRATION CHECK PASS (" + tools.size() + " concrete tools)");
+    }
+
+    /** Resuming a suspended thread runs the program's code, and so does stepping.
+     *
+     *  <p>{@code continue_execution} was BUILD and the three step tools MUTATE, which filed driving
+     *  a debuggee below writing a file -- below the very launch tools they exist to be compared
+     *  against. EXECUTE is where launch and run_tests already sit, so retiering is not a new
+     *  distinction, it is the distinction those two already made. The deny-list profiles in the
+     *  README are built from the tier, so this is what stops a Writer from driving a debuggee.
+     *  Asserted here because {@code DebugTools.selfCheck} cannot reach the published list. */
+    private static void checkDebugControlToolsAreExecuteTiered(List<Tool> tools) {
+        for (String name : List.of("continue_execution", "step_into", "step_over", "step_return")) {
+            ToolSpec.RiskTier tier = tools.stream()
+                    .filter(t -> t.spec().name().equals(name)).findFirst()
+                    .orElseThrow(() -> new AssertionError(name + " missing")).spec().riskTier();
+            if (tier != ToolSpec.RiskTier.EXECUTE)
+                throw new AssertionError(name + " is tiered " + tier
+                        + "; resuming a thread runs the debuggee, so it must be EXECUTE");
+        }
     }
 
     /** launch is EXECUTE and it was in the session-start set, so a client's first tools/list

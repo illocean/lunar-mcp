@@ -81,13 +81,13 @@ public final class DebugTools implements ToolProvider {
                 object(Map.of("frameId",string(),"variablePath",Map.of("type","array","items",Map.of("type","integer","minimum",0,"maximum",Integer.MAX_VALUE),"default",List.of()),
                     "offset",integer(0,0,Integer.MAX_VALUE),"limit",integer(50,1,100),"maxValueLength",integer(512,1,4096)),"frameId"),
                 this::variables),
-            tool("continue_execution", "Resume one suspended thread; invalidates its frame handles", BUILD,
+            tool("continue_execution", "Resume one suspended thread; invalidates its frame handles", EXECUTE,
                 object(Map.of("threadId",string()),"threadId"), (a,b) -> control(a,b,"resume")),
-            tool("step_into", "Step into and wait for suspension or termination", MUTATE,
+            tool("step_into", "Step into and wait for suspension or termination", EXECUTE,
                 object(Map.of("threadId",string()),"threadId"), (a,b) -> control(a,b,"into")),
-            tool("step_over", "Step over and wait for suspension or termination", MUTATE,
+            tool("step_over", "Step over and wait for suspension or termination", EXECUTE,
                 object(Map.of("threadId",string()),"threadId"), (a,b) -> control(a,b,"over")),
-            tool("step_return", "Step out and wait for suspension or termination", MUTATE,
+            tool("step_return", "Step out and wait for suspension or termination", EXECUTE,
                 object(Map.of("threadId",string()),"threadId"), (a,b) -> control(a,b,"return"))
         );
     }
