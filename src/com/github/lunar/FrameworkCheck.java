@@ -62,6 +62,15 @@ public final class FrameworkCheck {
         ToolResult success = ToolRunner.run(tool(b -> ToolResult.ok(Map.of("name", "月"), null)),
                 Map.of(), new CallBudget(5_000), null);
         check("real Job result", success.ok() && success.meta().bytesAfterShaping() == 14);
+        // Worker.run's exception table routes Error and Exception to the same handler, so an Error
+        // used to complete the job with result and failure both null. That reached the client as
+        // no_result, carrying no exception class and no stack -- the one failure it cannot act on.
+        ToolResult errored = ToolRunner.run(tool(b -> { throw new StackOverflowError("deep"); }),
+                Map.of(), new CallBudget(5_000), null);
+        check("an Error is a tool failure, not no_result", !errored.ok()
+                && "tool_failed".equals(errored.error().get("code"))
+                && String.valueOf(((Map<?, ?>) errored.error().get("details")).get("exception"))
+                        .endsWith("StackOverflowError"));
         AtomicBoolean called = new AtomicBoolean();
         CallBudget alreadyCancelled = new CallBudget(5_000);
         alreadyCancelled.cancel();

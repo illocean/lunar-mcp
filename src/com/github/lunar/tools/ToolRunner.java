@@ -38,7 +38,11 @@ public final class ToolRunner {
                 } catch (OperationCanceledException cancelled) {
                     failure.set(cancelled);
                     return Status.CANCEL_STATUS;
-                } catch (Exception exception) {
+                } catch (Throwable exception) {
+                    // Throwable, not Exception: Worker.run's exception table routes Error and
+                    // Exception to the same handler and ends the job normally either way, so an
+                    // Error used to leave result and failure both null and reach the client as
+                    // no_result -- no exception class, no stack, nothing to act on.
                     failure.set(exception);
                     // The error envelope owns reporting; avoid a second workbench error dialog.
                     return Status.OK_STATUS;
