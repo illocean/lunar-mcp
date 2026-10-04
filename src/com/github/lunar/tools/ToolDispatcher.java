@@ -138,8 +138,6 @@ public final class ToolDispatcher {
             }
             return total;
         }
-
-        
     }
 
     public static Session sessionFor(String header) {

@@ -22,9 +22,10 @@ public final class CoreTools implements ToolProvider {
     static final Set<String> INTERNAL = Set.of("find_tools", "load_toolset", "get_session_info",
             "resume_result", "batch", "capture_baseline", "get_delta");
     /** The tools a client can see before it loads anything. {@code launch} is deliberately absent: it
-     *  is the only EXECUTE tool, and a start-of-session tools/list that offers it offers arbitrary
-     *  code execution to every client before it has chosen to ask for it. {@code run_tests} is
-     *  EXECUTE too and is already gated behind its toolset. */
+     *  is one of only two EXECUTE tools, and the only one that would otherwise be visible at
+     *  session start, so a first tools/list offered arbitrary code execution to every client
+     *  before it had chosen to ask for it. {@code run_tests} is EXECUTE too and is already
+     *  gated behind its toolset. */
     private static final Set<String> CORE = Set.of("find_tools", "load_toolset", "get_session_info",
             "resume_result", "batch", "capture_baseline", "get_delta", "list_projects",
             "project_info", "list_files", "read_file", "search_text", "get_problems",

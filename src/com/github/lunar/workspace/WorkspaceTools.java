@@ -483,7 +483,16 @@ public final class WorkspaceTools implements ToolProvider {
         String separator = java.util.regex.Pattern.quote(java.io.File.pathSeparator);
         for (String entry : property.split(separator)) {
             if (entry.isBlank()) continue;
-            java.nio.file.Path root = java.nio.file.Path.of(entry.trim());
+            // A NUL or an illegal Windows character makes Path.of throw InvalidPathException,
+            // which is unchecked and would escape as the tool_failed this method exists to
+            // stop. It is a typo like any other, so it is refused like any other.
+            java.nio.file.Path root;
+            try {
+                root = java.nio.file.Path.of(entry.trim());
+            } catch (java.nio.file.InvalidPathException invalid) {
+                throw new RequestError("location_not_allowed",
+                        "lunar.projectRoots entry is not a usable path: " + entry.trim());
+            }
             if (!root.isAbsolute())
                 throw new RequestError("location_not_allowed",
                         "lunar.projectRoots entry is not an absolute path: " + entry.trim());
@@ -1082,6 +1091,16 @@ public final class WorkspaceTools implements ToolProvider {
                 // accident, because nothing named it. It has to be refused as what it is.
                 if (!refused.getMessage().contains("not an absolute path"))
                     throw new AssertionError("a relative entry was not refused as relative: "
+                            + refused.getMessage());
+                checked++;
+            }
+            // Same for an entry that cannot be a path at all.
+            try {
+                configuredRoots("bad\0root");
+                throw new AssertionError("an unusable projectRoots entry was accepted");
+            } catch (RequestError refused) {
+                if (!refused.getMessage().contains("not a usable path"))
+                    throw new AssertionError("an unusable entry was not refused as unusable: "
                             + refused.getMessage());
                 checked++;
             }
