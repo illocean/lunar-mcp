@@ -467,6 +467,9 @@ public final class WorkspaceTools implements ToolProvider {
         for (String entry : property.split(separator)) {
             if (entry.isBlank()) continue;
             java.nio.file.Path root = java.nio.file.Path.of(entry.trim());
+            if (!root.isAbsolute())
+                throw new RequestError("location_not_allowed",
+                        "lunar.projectRoots entry is not an absolute path: " + entry.trim());
             if (!Files.isDirectory(root))
                 throw new RequestError("location_not_allowed",
                         "lunar.projectRoots names a directory that does not exist: " + root);
@@ -1050,6 +1053,20 @@ public final class WorkspaceTools implements ToolProvider {
             } catch (RequestError refused) {
                 if (!refused.getMessage().contains(absent))
                     throw new AssertionError("the refusal does not name the entry: " + refused.getMessage());
+                checked++;
+            }
+            // A relative entry resolved against whatever the JVM's working directory happened to
+            // be, which is the install directory on some launchers and the user's home on others.
+            // The operator named a root, not a guess about the working directory.
+            try {
+                configuredRoots("relative-root");
+                throw new AssertionError("a relative projectRoots entry was accepted");
+            } catch (RequestError refused) {
+                // "does not exist" is not a pass: the old code refused a relative entry by
+                // accident, because nothing named it. It has to be refused as what it is.
+                if (!refused.getMessage().contains("not an absolute path"))
+                    throw new AssertionError("a relative entry was not refused as relative: "
+                            + refused.getMessage());
                 checked++;
             }
             // A root that is, or contains, the home directory or the workspace is the opposite of
