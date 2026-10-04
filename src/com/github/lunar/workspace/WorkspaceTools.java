@@ -1059,7 +1059,13 @@ public final class WorkspaceTools implements ToolProvider {
         Files.writeString(inside.resolve("owned.txt"), "may go");
         int checked = 0;
         try {
-            if (!mklink(victim, link)) return checked; // No links available here; nothing to assert.
+            // Failing to build the link is a broken environment, not a vacuous pass. Returning
+            // early made the check vanish and took three off the reported count, so the one
+            // property that would erase a directory outside the workspace could rot unnoticed
+            // on exactly the machine nobody was watching.
+            if (!mklink(victim, link))
+                throw new AssertionError("could not create a junction or a symlink at " + link
+                        + "; deleteRecursively following a link out of the project is unproven here");
             deleteRecursively(project, new CallBudget(5_000));
             if (!Files.exists(precious)) throw new AssertionError("delete followed a link out of the project"); checked++;
             if (Files.exists(project, LinkOption.NOFOLLOW_LINKS)) throw new AssertionError("project tree was not deleted"); checked++;
@@ -1072,8 +1078,8 @@ public final class WorkspaceTools implements ToolProvider {
 
     /**
      * Junction first, symlink second: {@code mklink /J} needs no elevation and is what Explorer
-     * produces, while {@code createSymbolicLink} does. False means neither worked, so the caller
-     * skips rather than asserting on a tree that has no link in it.
+     * produces, while {@code createSymbolicLink} does. False means neither worked, which the one
+     * caller treats as a failure of the environment rather than as a check to skip.
      */
     private static boolean mklink(java.nio.file.Path target, java.nio.file.Path link) {
         try {
