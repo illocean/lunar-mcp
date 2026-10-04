@@ -19,7 +19,10 @@ public final class CallBudget {
     private volatile IProgressMonitor monitor = new NullProgressMonitor();
     private volatile Job job;
     private volatile boolean cancellationHonoured = true;
-    private int maxOutputBytes = 16_384;
+    // Written by the dispatch thread (ToolDispatcher:353) and read by the tool body on the Job
+    // worker (CoreTools:134). Every other mutable field here is volatile; this one had no
+    // happens-before edge of its own and leaned on Job.schedule()'s internals to supply one.
+    private volatile int maxOutputBytes = 16_384;
     private volatile boolean stopped;
     private final java.util.concurrent.atomic.AtomicReference<Runnable> afterStop = new java.util.concurrent.atomic.AtomicReference<>();
 
