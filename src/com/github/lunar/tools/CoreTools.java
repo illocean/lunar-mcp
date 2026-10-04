@@ -21,10 +21,14 @@ import org.eclipse.core.runtime.jobs.ISchedulingRule;
 public final class CoreTools implements ToolProvider {
     static final Set<String> INTERNAL = Set.of("find_tools", "load_toolset", "get_session_info",
             "resume_result", "batch", "capture_baseline", "get_delta");
+    /** The tools a client can see before it loads anything. {@code launch} is deliberately absent: it
+     *  is the only EXECUTE tool, and a start-of-session tools/list that offers it offers arbitrary
+     *  code execution to every client before it has chosen to ask for it. {@code run_tests} is
+     *  EXECUTE too and is already gated behind its toolset. */
     private static final Set<String> CORE = Set.of("find_tools", "load_toolset", "get_session_info",
             "resume_result", "batch", "capture_baseline", "get_delta", "list_projects",
             "project_info", "list_files", "read_file", "search_text", "get_problems",
-            "build_project", "wait_until_quiet", "list_launch_configs", "launch", "get_console_output");
+            "build_project", "wait_until_quiet", "list_launch_configs", "get_console_output");
     private static final int RETAIN_BYTES = 2 * 1024 * 1024;
     private static final AtomicLong generation = new AtomicLong();
     private static final IResourceChangeListener listener = event -> generation.incrementAndGet();
