@@ -453,13 +453,16 @@ public final class RunTools implements ToolProvider {
         Object required = deleter.spec().inputSchema().get("required");
         if (!(required instanceof List<?> r) || !r.contains("confirm")) throw new AssertionError("delete_launch_config is not confirm-gated");
         // Running a project's main method and running its tests both execute code the workspace
-        // never compiled here. Tiering them as BUILD understates what the caller approved, so a
-        // BUILD-only auto-approve list would wave them through.
+        // never compiled here. EXECUTE is the top tier, so compareTo is now always <= 0 against it
+        // and the ordering carries no meaning here: the tier has to be EXECUTE by name.
+        if (ToolSpec.RiskTier.values()[ToolSpec.RiskTier.values().length - 1] != ToolSpec.RiskTier.EXECUTE)
+            throw new AssertionError("EXECUTE is not the highest risk tier; a client that ranks the "
+                    + "published order would file running a project's code below a file write");
         for (String name : List.of("launch", "run_tests")) {
             ToolSpec.RiskTier tier = tools.stream().filter(t -> t.spec().name().equals(name))
                     .findFirst().orElseThrow(() -> new AssertionError(name + " missing")).spec().riskTier();
-            if (tier == ToolSpec.RiskTier.BUILD || tier.compareTo(ToolSpec.RiskTier.EXECUTE) < 0)
-                throw new AssertionError(name + " is tiered " + tier + "; running code must be at least EXECUTE");
+            if (tier != ToolSpec.RiskTier.EXECUTE)
+                throw new AssertionError(name + " is tiered " + tier + "; running code must be EXECUTE");
         }
         // The tier is only half the fix: launch must also refuse a config that is not a Java
         // application, or a JUnit/Ant config still executes through the same argument.
