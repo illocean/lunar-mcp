@@ -1022,10 +1022,6 @@ public final class WorkspaceTools implements ToolProvider {
         if (!safeProjectName("../evil").isEmpty()) throw new AssertionError("project name validation accepts traversal"); checked++;
         if (!safeProjectName("..").isEmpty()) throw new AssertionError("project name validation accepts '..'"); checked++;
         if (!"IO.FileHandleReport".equals(safeProjectName("IO.FileHandleReport"))) throw new AssertionError("dots inside a name must be legal"); checked++;
-        // A self-paging read must be recognised as self-paging, or shape() previews it away
-        // and the documented read loop loses nextOffset. That recognition is key presence, not
-        // size, so a page at the full declared limit must still carry the key.
-        if (!Map.of("nextOffset", 65536).containsKey("nextOffset")) throw new AssertionError("self-paging marker lost"); checked++;
         if (readEnd("a".repeat(70000), 0, 65536) != 65536) throw new AssertionError("declared limit is not honoured"); checked++;
         checked += linkSafeDelete();
         checked += projectRootIsBounded();

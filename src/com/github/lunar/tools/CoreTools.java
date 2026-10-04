@@ -311,6 +311,19 @@ public final class CoreTools implements ToolProvider {
         if(ToolDispatcher.evictIdleSessions()!=0)
             throw new AssertionError("hasSession did not evict the expired session itself");
         ToolDispatcher.deleteSession(staleId);
+        // A tool that pages its own output owns the budget: shape() replacing it with a cursor
+        // stub would hide nextOffset and strand the read loop README:187 documents. Recognition
+        // is key presence, not size, so a page at the full declared limit still passes through.
+        // The control carries as much weight as the case -- a plain result of the same size must
+        // still be stubbed, or this would pass with the recognition removed entirely.
+        var pageSession=new ToolDispatcher.Session("shape-self-paging");
+        String oversized="x".repeat(64*1024);
+        var paged=shape(pageSession,ToolResult.ok(Map.of("nextOffset",oversized.length(),"hasMore",false,"text",oversized),null),1024,false);
+        if(!(paged.data() instanceof Map<?,?> kept)||!kept.containsKey("nextOffset")||paged.meta().truncated())
+            throw new AssertionError("shape() replaced a self-paging result with a cursor stub, stranding the documented read loop");
+        var plain=shape(pageSession,ToolResult.ok(Map.of("text",oversized),null),1024,false);
+        if(!(plain.data() instanceof Map<?,?> stub)||!stub.containsKey("cursor"))
+            throw new AssertionError("shape() did not stub an over-budget plain result, so the self-paging check above would pass for the wrong reason");
         // And the ceiling itself must not have been silently raised along the way.
         assert ToolDispatcher.WINDOW_BYTES==8L*1024*1024;
         System.out.println("CORE CHECK PASS");
