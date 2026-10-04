@@ -12,7 +12,7 @@ flowchart LR
 
     subgraph host["Eclipse 2025-12 (4.38) + JDK 21"]
         http["McpHttpServer<br/>127.0.0.1:8124/mcp<br/>Bearer token · protocol 2025-06-18"]
-        toolset["ToolDispatcher<br/>47 tools · 18 visible at start<br/>lazy toolsets · batch · risk tiers"]
+        toolset["ToolDispatcher<br/>47 tools · 17 visible at start<br/>lazy toolsets · batch · risk tiers"]
         jdt["JDT compiler<br/>symbols · references · markers"]
         build["Incremental build<br/>real problem markers"]
         run["Launch configurations<br/>console · JUnit runner"]
@@ -33,8 +33,8 @@ An agent working on files and a shell cannot know whether its edit compiles, wha
 |---|---|
 | **Protocol** | MCP streamable HTTP, `2025-06-18`, one URL. Not stdio — there is nothing to launch. |
 | **Transport auth** | `Authorization: Bearer $ECLIPSE_MCP_TOKEN` on every request, loopback only. A missing token is `401`. |
-| **Tools** | 47 total. 18 are visible at start; `load_toolset` exposes the other 29. |
-| **Safety** | Every schema carries `x-lunar-risk-tier` (`read`/`build`/`mutate`/`destructive`), so what a call may do is readable before it runs. |
+| **Tools** | 47 total. 17 are visible at start; `load_toolset` exposes the other 30. |
+| **Safety** | Every schema carries `x-lunar-risk-tier` (`read`/`build`/`mutate`/`destructive`/`execute`, least to most dangerous), so what a call may do is readable before it runs. |
 | **Writes** | `write_file`, `move_file`, `delete_file`, `apply_edit`, `apply_quick_fix` all require the current `read_file` hash as `expectedHash`. |
 | **Deps** | None. No Maven, Gradle, Ant or Tycho. Compiled with plain `javac --release 21`. |
 | **Platform** | Windows only. |
@@ -169,7 +169,7 @@ Ask the agent *"List the projects in the Eclipse workspace."* You should see a `
 curl.exe -s -X POST http://127.0.0.1:8124/mcp -H "Authorization: Bearer $env:ECLIPSE_MCP_TOKEN" -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}'
 ```
 
-Expect HTTP 200 and 18 tools. Drop the `Authorization` header and you get `401`, which proves the token is enforced.
+Expect HTTP 200 and 17 tools. Drop the `Authorization` header and you get `401`, which proves the token is enforced.
 
 The escaped `\"` are required on Windows PowerShell 5.1 through 7.3: those versions re-quote the argument as one string for the native process and drop the inner quotes, so the JSON arrives unquoted and the server answers `-32700 parse error`. PowerShell 7.4 is where that stopped mattering — its `Windows` mode still falls back to the old behaviour for `.cmd`, `.bat`, `wscript`, `find.exe` and similar, but `curl.exe` is not on that list and gets a real argument list, so on 7.4+ the plain `'{"jsonrpc"...}'` form works. On 7.3, set `$PSNativeCommandArgumentPassing = 'Standard'` to get it.
 
@@ -188,7 +188,7 @@ Results that exceed the per-call byte budget are truncated with a session cursor
 
 ## Tools
 
-47 total, by toolset: 7 core, 21 workspace, 9 run, 10 debug. The 18 visible at start are the eight tools in the first table plus `project_info`, `list_files`, `read_file`, `search_text`, `get_problems`, `build_project`, `wait_until_quiet`, `list_launch_configs`, `launch`, `get_console_output`. `load_toolset` with `workspace`, `run`, `debug` or `all` reveals the rest for that session only. A client that caches its tool list must re-read it after a load.
+47 total, by toolset: 7 core, 21 workspace, 9 run, 10 debug. The 17 visible at start are the eight tools in the first table plus `project_info`, `list_files`, `read_file`, `search_text`, `get_problems`, `build_project`, `wait_until_quiet`, `list_launch_configs`, `get_console_output`. `load_toolset` with `workspace`, `run`, `debug` or `all` reveals the rest for that session only. A client that caches its tool list must re-read it after a load.
 
 ### Core and paging
 
@@ -229,6 +229,15 @@ The seven session tools here are always loaded and never sit behind `load_toolse
 | `clear_markers` | Delete matching markers under a project path | `project` |
 | `wait_until_quiet` | Wait for builds plus a resource-change quiet window | none |
 | `apply_quick_fix` | Persist a current unused/duplicate import correction | `project`, `path`, `markerId`, `expectedHash` |
+
+Every file tool is sandboxed to "the project", so registering a directory as a
+project hands the caller that directory. The default allowed root is the
+workspace root; `-Dlunar.projectRoots` **replaces** it with your own list, joined
+by the platform's path separator (`;` on Windows, `:` elsewhere), which is the
+`-D` of the JVM Eclipse is started with — put it in `eclipse.ini`. A root that
+does not exist is refused by name, and an ancestor of the workspace or of your
+home directory is refused even when named, because a root that contains the
+workspace contains everything the agent already has.
 
 ### Run, console and tests
 
@@ -283,8 +292,20 @@ are workspace tools, the only ones that touch files:
 | `move_file` | path | `expectedHash` |
 | `delete_file` | path | `expectedHash` |
 
-Note that clients allow and deny by tool name, not by risk tier, so a read-only
-setup is a deny list of the mutating and destructive names.
+Note that clients allow and deny by tool name, not by risk tier, so a profile is
+a deny list built from `x-lunar-risk-tier`:
+
+| Profile | Denies |
+| --- | --- |
+| **Reader** | every `mutate`, `destructive` and `execute` name, plus `create_launch_config` |
+| **Writer** | every `destructive` and `execute` name |
+| **Runner** | nothing; the full 47 |
+
+Two things do not follow from the tier alone. `create_launch_config` is `mutate`
+because it writes a file, but a launch configuration is how an agent gets code
+to run, so a Reader has to name it. And `execute` is exactly `launch` and
+`run_tests` — neither is visible at session start, so a profile that never calls
+`load_toolset("run")` cannot reach either one.
 
 **Every schema carries a risk tier**, readable from `tools/list` before any call
 runs.
@@ -296,7 +317,7 @@ listener answers.
 **A debug loop**: line breakpoints, run and debug launch, resume, step
 in/over/out, frame handles and variable inspection.
 
-**Lazy toolsets.** 47 tools, 18 visible at start. `load_toolset` reveals the rest
+**Lazy toolsets.** 47 tools, 17 visible at start. `load_toolset` reveals the rest
 for one session. Clients that cache `tools/list` must re-read it after a load.
 
 **Stated plainly, what is missing.** No refactoring engine, no type or call

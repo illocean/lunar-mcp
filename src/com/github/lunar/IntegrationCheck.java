@@ -75,6 +75,10 @@ public final class IntegrationCheck {
         try {
             var session = ToolDispatcher.sessionFor(sessionId);
             List<Object> atStart = ToolDispatcher.visibleTools(session);
+            // 17 is published in the README, in the diagram, in the tools table and in the curl
+            // example. This is what keeps those four from drifting.
+            if (atStart.size() != 17)
+                throw new AssertionError("expected 17 tools visible at start, got " + atStart.size());
             for (Object entry : atStart)
                 if ("execute".equals(inputSchemaOf(entry).get("x-lunar-risk-tier")))
                     throw new AssertionError(nameOf(entry) + " is EXECUTE and visible at session start");
