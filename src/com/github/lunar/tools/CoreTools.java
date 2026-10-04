@@ -269,8 +269,16 @@ public final class CoreTools implements ToolProvider {
         var windowed=new ToolDispatcher.Session("window-check");
         while(reserveOutput(windowed,(int)(ToolDispatcher.WINDOW_BYTES/1024))) ;
         assert !reserveOutput(windowed,1024);
-        windowed.expireWindow();
-        assert windowed.windowedBytes()==0&&reserveOutput(windowed,1024);
+        // Age the clock past the window instead of clearing the buckets: the decay is the fix,
+        // so the check has to drive the same expiry a real hour would, and restore the clock
+        // afterwards or every later charge runs against a frozen time source.
+        long t0=ToolDispatcher.now();
+        try {
+            ToolDispatcher.ageWindow(()->t0+61*60_000L);
+            assert windowed.windowedBytes()==0&&reserveOutput(windowed,1024);
+        } finally {
+            ToolDispatcher.ageWindow(System::currentTimeMillis);
+        }
         // And the ceiling itself must not have been silently raised along the way.
         assert ToolDispatcher.WINDOW_BYTES==8L*1024*1024;
         System.out.println("CORE CHECK PASS");

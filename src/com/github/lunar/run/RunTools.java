@@ -465,7 +465,7 @@ public final class RunTools implements ToolProvider {
         // application, or a JUnit/Ant config still executes through the same argument.
         if (!typeAllowed(IJavaLaunchConfigurationConstants.ID_JAVA_APPLICATION, javaApplication()))
             throw new AssertionError("launch no longer accepts a Java application config");
-        for (String rejected : List.of(IJavaLaunchConfigurationConstants.ID_JUNIT_TEST,
+        for (String rejected : List.of(JUNIT_TYPE,
                 "org.eclipse.ant.core.antBuilder", "org.eclipse.pde.ui.RuntimeWorkbench")) {
             if (typeAllowed(rejected, javaApplication()))
                 throw new AssertionError("launch accepts a " + rejected + " configuration");

@@ -1,5 +1,6 @@
 package com.github.lunar.io;
 
+import com.github.lunar.tools.RequestError;
 import com.github.lunar.tools.ToolDispatcher;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
