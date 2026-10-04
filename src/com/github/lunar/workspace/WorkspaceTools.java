@@ -1109,9 +1109,17 @@ public final class WorkspaceTools implements ToolProvider {
             // ancestor used to hand the agent the whole drive, and projectRoots never worked on
             // Windows to do it until the separator was fixed. Four shapes: home itself, the
             // workspace itself, an ancestor of home, and an ancestor of the workspace.
-            java.nio.file.Path above = home.getParent() == null ? null : home.getParent().getParent();
-            for (java.nio.file.Path root : java.util.List.of(home, workspaceRoot,
-                    above == null ? home : above, workspaceRoot.getParent())) {
+            // Built by hand rather than with List.of for the same reason forbiddenRoots is:
+            // a drive root has no parent, and List.of would throw before the assertion ran.
+            List<java.nio.file.Path> tooBroad = new ArrayList<>();
+            tooBroad.add(home);
+            tooBroad.add(workspaceRoot);
+            java.nio.file.Path homeParent = home.getParent();
+            tooBroad.add(homeParent == null || homeParent.getParent() == null
+                    ? homeParent == null ? home : homeParent : homeParent.getParent());
+            java.nio.file.Path workspaceParent = workspaceRoot.getParent();
+            tooBroad.add(workspaceParent == null ? workspaceRoot : workspaceParent);
+            for (java.nio.file.Path root : tooBroad) {
                 try {
                     refuseAncestorRoots(List.of(root), home, workspaceRoot);
                     throw new AssertionError("an ancestor-or-self project root was accepted: " + root);
