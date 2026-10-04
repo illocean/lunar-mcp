@@ -220,10 +220,35 @@ public final class ToolDispatcher {
     /** @return the JSON-RPC response body for a method this dispatcher owns. */
     public static String dispatch(String method, String id, String paramsRaw, String sessionHeader) {
         return switch (method) {
-            case "tools/list" -> ok(id, Json.write(Map.of("tools", visibleTools(sessionFor(sessionHeader)))));
+            case "tools/list" -> toolList(id, sessionFor(sessionHeader));
             case "tools/call" -> toolCall(id, paramsRaw, sessionFor(sessionHeader));
             default -> null;
         };
+    }
+
+    /**
+     * tools/list is billed like any other response.
+     *
+     * <p>It returns every schema with its description, which makes it the largest body this server
+     * emits, and it sat outside the {@code tools/call} path that charges -- so a client could ask
+     * for the whole catalogue as often as the transport allowed and never move its output window.
+     * That window is what get_session_info reports as remainingOutputBytes, so leaving this
+     * unbilled made that number wrong as well: it reported the whole ceiling as free while the
+     * transport had already carried the catalogue twice.
+     *
+     * <p>Ponytail: check-then-charge, so a session within one catalogue of its ceiling is refused
+     * here and can retry once the window rolls, and the body is serialized before the check because
+     * that is the only honest way to learn its size. Making the pair atomic costs a lock around the
+     * whole build; do that only if a refusal here turns out to matter in practice.
+     */
+    private static String toolList(String id, Session session) {
+        String body = ok(id, Json.write(Map.of("tools", visibleTools(session))));
+        int bytes = body.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+        if (!CoreTools.outputWindowAllows(session, bytes))
+            return err(id, -32600, "output window exhausted; tools/list would emit " + bytes
+                    + " bytes. Read get_session_info for remainingOutputBytes and retry.");
+        session.charge(bytes);
+        return body;
     }
 
     private static String toolCall(String id, String paramsRaw, Session session) {

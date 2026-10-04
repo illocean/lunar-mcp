@@ -87,6 +87,7 @@ public final class ProtocolCheck {
             withCoreTools(() -> {
                 checkRefusalCarriesAStableCode(client, uri, session);
                 checkWindowBillsEmittedBytes(client, uri, session);
+                checkToolListIsBilled(client, uri, session);
                 return null;
             });
             checkCanonicalCancellation(client, uri, session);
@@ -196,6 +197,33 @@ public final class ProtocolCheck {
         assert spent < 64 * 1024
                 : "20 small calls spent " + spent
                 + " bytes of the output window, so the window is billing reservations";
+    }
+
+    /**
+     * The catalogue is the largest body this server emits, so it has to be billed too.
+     *
+     * <p>{@code tools/list} sits outside the {@code tools/call} path that charges, so a client
+     * could ask for every schema and description as often as the transport allowed and never
+     * move its output window -- and {@code get_session_info} reported the window as though
+     * nothing had been spent. Asserted over the wire because the charge is in the dispatcher.
+     */
+    private static void checkToolListIsBilled(HttpClient client, URI uri, String session)
+            throws Exception {
+        long before = remainingOutputBytes(sessionInfo(client, uri, session, 30));
+        long catalogue = 0;
+        for (int i = 0; i < 10; i++) {
+            HttpResponse<String> listed = send(client, uri,
+                    "{\"jsonrpc\":\"2.0\",\"id\":" + (300 + i) + ",\"method\":\"tools/list\"}",
+                    "Mcp-Session-Id", session);
+            assert listed.statusCode() == 200 && listed.body().contains("\"tools\"");
+            catalogue = Math.max(catalogue,
+                    listed.body().getBytes(java.nio.charset.StandardCharsets.UTF_8).length);
+        }
+        long spent = before - remainingOutputBytes(sessionInfo(client, uri, session, 31));
+        assert spent >= 10L * catalogue
+                : "10 tools/list calls emitted at least " + (10L * catalogue)
+                + " bytes but spent only " + spent
+                + " of the output window, so the catalogue is free";
     }
 
     private static HttpResponse<String> sessionInfo(HttpClient client, URI uri, String session, int id)
