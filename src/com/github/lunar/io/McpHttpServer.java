@@ -19,6 +19,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.Semaphore;
 import java.util.Map;
 import java.net.URI;
+import org.eclipse.core.runtime.Platform;
 
 /** Hand-rolled JSON-RPC over the JDK's built-in HTTP server. No third-party transport. */
 public final class McpHttpServer {
@@ -279,6 +280,11 @@ public final class McpHttpServer {
                 // Client already gone; nothing useful left to report.
             }
         } catch (Exception e) {
+            // handle() is the whole boundary, so nothing outside this method ever sees the
+            // throwable. Without this line a failed dispatch leaves no server-side record at
+            // all: the client gets a bare "internal error" and .metadata/.log holds the
+            // workbench trace with no request id to correlate it against.
+            Platform.getLog(McpHttpServer.class).error("Lunar request dispatch failed", e);
             try {
                 send(ex, 500, error("null", INTERNAL_ERROR, "internal error"));
             } catch (IOException ignored) {
