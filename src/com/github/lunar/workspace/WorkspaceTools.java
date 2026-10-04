@@ -427,6 +427,24 @@ public final class WorkspaceTools implements ToolProvider {
     }
 
     /**
+     * The paths a project location may never sit at or above, with the null workspace root
+     * filtered out rather than guarded inside the loop.
+     *
+     * <p>{@code List.of} rejects null elements in its constructor, so building the pair with a
+     * null {@code workspaceRoot} -- which {@link #allowedRoot} explicitly allows -- threw
+     * {@code NullPointerException} before any {@code if (forbidden == null) continue} could run.
+     * Every file tool on a workspace with no root location died as {@code tool_failed}, from a
+     * line whose own text claimed null was handled.
+     */
+    private static List<java.nio.file.Path> forbiddenRoots(java.nio.file.Path home,
+            java.nio.file.Path workspaceRoot) {
+        List<java.nio.file.Path> out = new ArrayList<>(2);
+        if (workspaceRoot != null) out.add(workspaceRoot);
+        out.add(home);
+        return out;
+    }
+
+    /**
      * A configured root that is, or contains, the workspace or the home directory is the opposite
      * of a sandbox: it hands the agent every file it already has, plus everything else. The
      * per-target check in {@link #bounded} refuses an ancestor *location*, so a root that was
@@ -437,8 +455,7 @@ public final class WorkspaceTools implements ToolProvider {
     static void refuseAncestorRoots(List<java.nio.file.Path> roots, java.nio.file.Path home,
             java.nio.file.Path workspaceRoot) {
         for (java.nio.file.Path root : roots)
-            for (java.nio.file.Path forbidden : List.of(workspaceRoot, home)) {
-                if (forbidden == null) continue;
+            for (java.nio.file.Path forbidden : forbiddenRoots(home, workspaceRoot)) {
                 if (forbidden.equals(root) || forbidden.startsWith(root))
                     throw new RequestError("location_not_allowed",
                             "an allowed project root is the workspace or the home directory, or an"
@@ -484,8 +501,7 @@ public final class WorkspaceTools implements ToolProvider {
      */
     static void bounded(java.nio.file.Path target, List<java.nio.file.Path> roots,
             java.nio.file.Path home, java.nio.file.Path workspaceRoot) {
-        for (java.nio.file.Path forbidden : List.of(workspaceRoot, home)) {
-            if (forbidden == null) continue;
+        for (java.nio.file.Path forbidden : forbiddenRoots(home, workspaceRoot)) {
             // Only an ANCESTOR is refused. A project legitimately sits under the workspace, so
             // testing the other direction would refuse every project that can be created at all.
             if (target.equals(forbidden) || forbidden.startsWith(target)) {
@@ -1089,6 +1105,19 @@ public final class WorkspaceTools implements ToolProvider {
             // A root strictly below home stays legal: naming ~/code is the ordinary case.
             refuseAncestorRoots(List.of(home.resolve("code")), home, workspaceRoot);
             checked++;
+            // A workspace with no root location is a documented state -- allowedRoot computes
+            // exactly that null and passes it on. List.of rejects null in its constructor, so
+            // this threw before the guard that claimed to handle it, and every file tool on such
+            // a workspace failed as tool_failed. The home guard is the only one left, and it
+            // still has to hold.
+            bounded(workspaceRoot.resolve("proj"), List.of(workspaceRoot), home, null);
+            checked++;
+            try {
+                bounded(home, List.of(workspaceRoot), home, null);
+                throw new AssertionError("home was not refused with a null workspace root");
+            } catch (RequestError refused) {
+                checked++;
+            }
         } finally {
             deleteTree(workspaceRoot);
             deleteTree(elsewhere);
