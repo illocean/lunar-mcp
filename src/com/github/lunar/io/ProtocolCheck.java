@@ -1,6 +1,7 @@
 package com.github.lunar.io;
 
 import com.github.lunar.tools.CallBudget;
+import com.github.lunar.tools.CoreTools;
 import com.github.lunar.tools.Tool;
 import com.github.lunar.tools.ToolRegistry;
 import com.github.lunar.tools.ToolResult;
@@ -81,6 +82,7 @@ public final class ProtocolCheck {
                             + "\"name\":\"load_toolset\",\"arguments\":{\"name\":\"invalid\"}}}",
                     "Mcp-Session-Id", session);
             assert failedLoad.headers().firstValue("Content-Type").orElse("").equals("application/json");
+            checkWindowBillsEmittedBytes(client, uri, session);
             checkCanonicalCancellation(client, uri, session);
             HttpRequest deleted = HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(10))
                     .header("Authorization", "Bearer check-token").header("Mcp-Session-Id", session)
@@ -97,6 +99,56 @@ public final class ProtocolCheck {
     private static long errorCode(HttpResponse<String> response) {
         Map<?, ?> error = (Map<?, ?>)((Map<?, ?>)Json.parse(response.body())).get("error");
         return ((Number)error.get("code")).longValue();
+    }
+
+    /**
+     * The window must bill the bytes a call emitted, not the {@code maxBytes} it reserved.
+     *
+     * <p>Twenty {@code get_session_info} calls answer in a few hundred bytes each. Charging the
+     * 16 KiB reservation instead spent 320 KiB of an 8 MiB window on about six kilobytes of real
+     * output, which capped every session at 512 calls an hour however small the responses were.
+     * Asserted over the wire because the charge happens in the dispatcher's {@code finally}
+     * block, so a unit check of the helper would never have reached the bug.
+     */
+    private static void checkWindowBillsEmittedBytes(HttpClient client, URI uri, String session)
+            throws Exception {
+        // The registry is empty outside OSGi, so the real core tools are injected. Only
+        // get_session_info is called, and it reads the dispatcher's own accounting rather than
+        // anything Eclipse owns, which is why this check needs no workspace.
+        Map<String, Tool> previous = ToolRegistry.all();
+        var install = ToolRegistry.class.getDeclaredMethod("installForTest", Map.class);
+        install.setAccessible(true);
+        Map<String, Tool> core = new java.util.LinkedHashMap<>();
+        for (Tool tool : new CoreTools().tools()) core.put(tool.spec().name(), tool);
+        install.invoke(null, core);
+        try {
+            long before = remainingOutputBytes(sessionInfo(client, uri, session, 20));
+            for (int i = 0; i < 20; i++) sessionInfo(client, uri, session, 100 + i);
+            long spent = before - remainingOutputBytes(sessionInfo(client, uri, session, 21));
+            assert spent < 64 * 1024
+                    : "20 small calls spent " + spent
+                    + " bytes of the output window, so the window is billing reservations";
+        } finally {
+            install.invoke(null, previous);
+        }
+    }
+
+    private static HttpResponse<String> sessionInfo(HttpClient client, URI uri, String session, int id)
+            throws Exception {
+        HttpResponse<String> response = send(client, uri,
+                "{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"method\":\"tools/call\",\"params\":{"
+                        + "\"name\":\"get_session_info\",\"arguments\":{}}}",
+                "Mcp-Session-Id", session);
+        assert response.statusCode() == 200;
+        return response;
+    }
+
+    /** {@code remainingOutputBytes} out of a tools/call result, through the JSON path a client reads. */
+    private static long remainingOutputBytes(HttpResponse<String> response) {
+        Map<?, ?> content = (Map<?, ?>) ((Map<?, ?>) ((Map<?, ?>) Json.parse(response.body()))
+                .get("result")).get("structuredContent");
+        assert Boolean.TRUE.equals(content.get("ok"));
+        return ((Number) ((Map<?, ?>) content.get("data")).get("remainingOutputBytes")).longValue();
     }
 
     private static void checkCanonicalCancellation(HttpClient client, URI uri, String session)

@@ -36,10 +36,13 @@ public final class CoreTools implements ToolProvider {
     public static void stop() {
         ResourcesPlugin.getWorkspace().removeResourceChangeListener(listener);
     }
-    /** Charges the trailing window instead of a lifetime total: a long-lived session must not be
-     *  starved by output it emitted an hour ago, but a burst inside the window must still stop. */
-    static boolean reserveOutput(ToolDispatcher.Session s,int bytes){
-        return s.charge(bytes) <= ToolDispatcher.WINDOW_BYTES;
+    /** Would {@code bytes} of output push this session past its trailing window? A check, not a
+     *  charge: the caller bills what the call actually emitted once it knows, so a 200-byte response
+     *  costs 200 bytes and a refused call costs nothing at all. Charging the reservation instead
+     *  capped every session at WINDOW_BYTES/maxBytes calls an hour -- 512 by default -- however
+     *  small the responses were, and a client retrying on the refusal billed its own lockout. */
+    static boolean outputWindowAllows(ToolDispatcher.Session s,int bytes){
+        return s.windowedBytes()+bytes<=ToolDispatcher.WINDOW_BYTES;
     }
     static String group(Tool tool) {
         String name = tool.getClass().getName();
@@ -262,20 +265,31 @@ public final class CoreTools implements ToolProvider {
         assert failed.meta().truncated()&&bytes(ToolDispatcher.encodeResult(failed,s.id))<=1024;
         Map<String,Object> nullValue=new LinkedHashMap<>();nullValue.put("added",null);
         assert !delta(Map.of(),nullValue).equals(Map.of());
-        // The output budget is a trailing window, not a lifetime total: a session that once blew
-        // past the ceiling used to be refused forever, which pushed clients to burn a fresh
-        // session per task and left the long-lived ones idle. Ageing buckets out is the fix, so
-        // check that a full window decays and that a live burst is still refused.
+        // The window bills what a call emitted, not what it reserved. Charging the reservation
+        // capped every session at 512 calls an hour however small the responses were, and
+        // charging a refused call made a client that retried on session_budget_exhausted extend
+        // its own lockout. A thousand 200-byte calls have to fit in an 8 MiB window.
         var windowed=new ToolDispatcher.Session("window-check");
-        while(reserveOutput(windowed,(int)(ToolDispatcher.WINDOW_BYTES/1024))) ;
-        assert !reserveOutput(windowed,1024);
-        // Age the clock past the window instead of clearing the buckets: the decay is the fix,
-        // so the check has to drive the same expiry a real hour would, and restore the clock
-        // afterwards or every later charge runs against a frozen time source.
+        for(int i=0;i<1000;i++){
+            if(!outputWindowAllows(windowed,16384))
+                throw new AssertionError("1000 small calls exhausted the window at call "+i
+                        +": a refused call was billed, or the reservation was charged instead of the bytes");
+            windowed.charge(200);
+        }
+        assert windowed.windowedBytes()==200_000L:"charged the reservation, not the emitted bytes";
+        // A refusal costs the caller nothing, so a retry loop on it can still clear.
+        assert !outputWindowAllows(windowed,(int)ToolDispatcher.WINDOW_BYTES);
+        assert windowed.windowedBytes()==200_000L:"a refused call was charged";
+        // A full window still stops a live burst, and only ageing the clock decays it: the expiry
+        // is the fix, so drive the same decay a real hour would and then restore the clock, or
+        // every later charge runs against a frozen time source.
+        var full=new ToolDispatcher.Session("window-full");
+        while(full.windowedBytes()<ToolDispatcher.WINDOW_BYTES) full.charge(ToolDispatcher.WINDOW_BYTES/1024);
+        assert !outputWindowAllows(full,1024);
         long t0=ToolDispatcher.now();
         try {
             ToolDispatcher.ageWindow(()->t0+61*60_000L);
-            assert windowed.windowedBytes()==0&&reserveOutput(windowed,1024);
+            assert full.windowedBytes()==0&&outputWindowAllows(full,1024);
         } finally {
             ToolDispatcher.ageWindow(System::currentTimeMillis);
         }

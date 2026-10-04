@@ -103,12 +103,17 @@ public final class ToolDispatcher {
         public long toolCalls() { return toolCalls.get(); }
 
         /**
-         * Charge {@code bytes} against the trailing one-hour window and report the total still
-         * inside it, expiring buckets as they age past the window.
+         * Charge {@code bytes} against the trailing one-hour window and the lifetime total,
+         * expiring buckets as they age past the window.
+         *
+         * <p>No return value. It used to report the window total, and it got that total wrong: it
+         * summed every bucket and then added the current bucket again, so the number it reported
+         * was nearly twice the real one and grew with the current minute's own traffic. Comparing
+         * that against the ceiling refused a session at half the window it advertised.
+         * {@link #windowedBytes()} is the total to compare.
          */
-        synchronized long charge(long bytes) {
+        synchronized void charge(long bytes) {
             long bucket = now() / 60_000L;
-            long total = 0;
             for (int i = 0; i < WINDOW_BUCKETS; i++) {
                 // A bucket from an hour or more ago is out of the window; so is any bucket older
                 // than the newest one we hold, which is the wraparound case within the hour.
@@ -116,14 +121,11 @@ public final class ToolDispatcher {
                     windowMinutes[i] = 0;
                     windowBytes[i].set(0);
                 }
-                total += windowBytes[i].get();
             }
             int slot = (int) Math.floorMod(bucket, WINDOW_BUCKETS);
             if (windowMinutes[slot] != bucket) { windowMinutes[slot] = bucket; windowBytes[slot].set(0); }
-            // Count what was just charged, or the cap is soft by exactly one response.
-            total += windowBytes[slot].addAndGet(bytes);
+            windowBytes[slot].addAndGet(bytes);
             emittedBytes.addAndGet(bytes);
-            return total;
         }
 
         /** Bytes charged inside the trailing window, without charging anything new. */
@@ -292,7 +294,7 @@ public final class ToolDispatcher {
             return err(id, -32600, "request id already active in this session");
         }
         if (session.closed) budget.cancel();
-        if(!CoreTools.reserveOutput(session,maxBytes)){
+        if(!CoreTools.outputWindowAllows(session,maxBytes)){
             ACTIVE.remove(key,budget);
             return ok(id,encodeResult(ToolResult.error("session_budget_exhausted",
                     "Initialize a new session; output budget is exhausted and no tool ran",null),session.id()));
@@ -314,7 +316,11 @@ public final class ToolDispatcher {
             Thread.currentThread().interrupt();budget.cancel();r=ToolResult.error("interrupted","Interrupted while waiting to mutate",null);
             emitted=encodeResult(r,session.id()).getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
         } finally {
-            session.emittedBytes.addAndGet(emitted-maxBytes);
+            // Bill what the call emitted, not what it reserved. The reservation is an upper
+            // bound; refunding it against the lifetime total left every window bucket still
+            // holding the full reservation, so a burst of small calls filled the window with
+            // bytes that were never sent and refused the session hours of work later.
+            session.charge(emitted);
             if(mutationHeld){if(budget.isRunning())budget.afterStop(MUTATIONS::release);else MUTATIONS.release();}
             if (!budget.isRunning()) ACTIVE.remove(key, budget);
         }
