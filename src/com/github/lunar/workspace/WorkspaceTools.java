@@ -411,26 +411,46 @@ public final class WorkspaceTools implements ToolProvider {
      * hands the caller that directory. Rejecting only the {@code ..} substring therefore let an
      * agent register a parent of the workspace and then write or delete anywhere under it, which
      * makes {@code confirm} on delete a typo guard and nothing more. The default is the workspace
-     * root itself; {@code -Dlunar.projectRoots=a;b} widens it, and an ancestor of the workspace or
-     * of the home directory is refused even when named, because a root that contains the workspace
-     * is a root that contains everything the agent already has.
-     *
-     * <p>Ponytail: the property is read per call so a changed value takes effect without a restart,
-     * which is cheap. Cache it if it ever shows up in a profile.
+     * root itself; {@code -Dlunar.projectRoots} <em>replaces</em> that default with its own list,
+     * joined by {@link java.io#pathSeparator}, and an ancestor of the workspace or of the home
+     * directory is refused even when named, because a root that contains the workspace is a root
+     * that contains everything the agent already has.
      */
     static void allowedRoot(java.nio.file.Path dir) throws Exception {
         java.nio.file.Path workspaceRoot = workspace().getRoot().getLocation() == null ? null
                 : workspace().getRoot().getLocation().toFile().toPath().toRealPath();
         java.nio.file.Path home = java.nio.file.Path.of(System.getProperty("user.home", "")).toRealPath();
-        List<java.nio.file.Path> roots = new ArrayList<>();
-        String configured = System.getProperty("lunar.projectRoots");
-        if (configured != null && !configured.isBlank()) {
-            for (String entry : configured.split("[;:]")) {
-                if (!entry.isBlank()) roots.add(java.nio.file.Path.of(entry.trim()).toRealPath());
-            }
-        }
+        List<java.nio.file.Path> roots = configuredRoots(System.getProperty("lunar.projectRoots"));
         if (roots.isEmpty() && workspaceRoot != null) roots.add(workspaceRoot);
         bounded(dir.toRealPath(), roots, home, workspaceRoot);
+    }
+
+    /**
+     * The roots named by {@code -Dlunar.projectRoots}, split on the platform's own separator.
+     *
+     * <p>It split on {@code [;:]}, which cut a Windows path in half -- {@code D:\code} became
+     * {@code D} and {@code \code} -- and then called {@code toRealPath} on each piece, so every
+     * root on Windows threw and every create_project with a location failed as tool_failed. It
+     * also called {@code toRealPath} on the entry itself, so a root that simply is not there yet
+     * threw a raw {@code NoSuchFileException} that no client could act on. Both are refused by
+     * name instead.
+     *
+     * <p>Ponytail: read per call so a changed value takes effect without a restart, which is
+     * cheap. Cache it if it ever shows up in a profile.
+     */
+    static List<java.nio.file.Path> configuredRoots(String property) throws Exception {
+        List<java.nio.file.Path> roots = new ArrayList<>();
+        if (property == null || property.isBlank()) return roots;
+        String separator = java.util.regex.Pattern.quote(java.io.File.pathSeparator);
+        for (String entry : property.split(separator)) {
+            if (entry.isBlank()) continue;
+            java.nio.file.Path root = java.nio.file.Path.of(entry.trim());
+            if (!Files.isDirectory(root))
+                throw new RequestError("location_not_allowed",
+                        "lunar.projectRoots names a directory that does not exist: " + root);
+            roots.add(root.toRealPath());
+        }
+        return roots;
     }
 
     /**
@@ -989,6 +1009,27 @@ public final class WorkspaceTools implements ToolProvider {
             // And a project legitimately under the workspace is still allowed.
             bounded(workspaceRoot.resolve("proj"), List.of(workspaceRoot), home, workspaceRoot);
             checked++;
+            // The property is read with the platform's own separator. Splitting on [;:] cut a
+            // Windows path in half -- D:\code became D and \code -- and then resolved each piece,
+            // so every configured root on Windows threw and create_project never ran.
+            String sep = String.valueOf(java.io.File.pathSeparatorChar);
+            List<java.nio.file.Path> parsed =
+                    configuredRoots(workspaceRoot + sep + elsewhere);
+            if (parsed.size() != 2 || !parsed.get(0).equals(workspaceRoot.toRealPath())
+                    || !parsed.get(1).equals(elsewhere.toRealPath()))
+                throw new AssertionError("projectRoots did not split on the platform separator: " + parsed);
+            checked++;
+            // A root that is not there is refused by name, not as a raw NoSuchFileException the
+            // client cannot act on -- one typo used to fail every create_project as tool_failed.
+            String absent = new java.io.File("lunar-no-such-root-" + java.util.UUID.randomUUID()).getAbsolutePath();
+            try {
+                configuredRoots(absent);
+                throw new AssertionError("a nonexistent projectRoots entry was accepted");
+            } catch (RequestError refused) {
+                if (!refused.getMessage().contains(absent))
+                    throw new AssertionError("the refusal does not name the entry: " + refused.getMessage());
+                checked++;
+            }
         } finally {
             deleteTree(workspaceRoot);
             deleteTree(elsewhere);
