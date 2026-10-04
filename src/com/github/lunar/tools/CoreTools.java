@@ -12,6 +12,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.stream.Stream;
 import org.eclipse.core.resources.IResourceChangeEvent;
 import org.eclipse.core.resources.IResourceChangeListener;
 import org.eclipse.core.resources.ResourcesPlugin;
@@ -25,11 +26,13 @@ public final class CoreTools implements ToolProvider {
      *  is one of only two EXECUTE tools, and the only one that would otherwise be visible at
      *  session start, so a first tools/list offered arbitrary code execution to every client
      *  before it had chosen to ask for it. {@code run_tests} is EXECUTE too and is already
-     *  gated behind its toolset. */
-    private static final Set<String> CORE = Set.of("find_tools", "load_toolset", "get_session_info",
-            "resume_result", "batch", "capture_baseline", "get_delta", "list_projects",
-            "project_info", "list_files", "read_file", "search_text", "get_problems",
-            "build_project", "wait_until_quiet", "list_launch_configs", "get_console_output");
+     *  gated behind its toolset. Every {@link #INTERNAL} tool is a member by construction rather
+     *  than by a second hand-copied list: an eighth internal tool added to INTERNAL but not here
+     *  would vanish from the session-start tools/list while still being nest-blocked at dispatch,
+     *  which is the one property {@code nested_call_forbidden} exists to enforce. */
+    private static final Set<String> CORE = Set.copyOf(Stream.concat(INTERNAL.stream(), Stream.of(
+            "list_projects", "project_info", "list_files", "read_file", "search_text", "get_problems",
+            "build_project", "wait_until_quiet", "list_launch_configs", "get_console_output")).toList());
     private static final int RETAIN_BYTES = 2 * 1024 * 1024;
     private static final AtomicLong generation = new AtomicLong();
     private static final IResourceChangeListener listener = event -> generation.incrementAndGet();
