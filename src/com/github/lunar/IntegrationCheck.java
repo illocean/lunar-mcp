@@ -66,11 +66,13 @@ public final class IntegrationCheck {
      *  offered arbitrary code execution from the workspace before it had asked for it. Asserted
      *  against the published list rather than the CORE constant, and here rather than in
      *  {@code CoreTools.main} because the registry is empty outside OSGi. */
-    private static void checkSessionStartOffersNoExecution(List<Tool> tools) {
+    private static void checkSessionStartOffersNoExecution(List<Tool> tools) throws Exception {
         Map<String, Tool> registry = new LinkedHashMap<>();
         for (Tool tool : tools) registry.put(tool.spec().name(), tool);
         Map<String, Tool> previous = ToolRegistry.all();
-        ToolRegistry.installForTest(registry);
+        var install = ToolRegistry.class.getDeclaredMethod("installForTest", Map.class);
+        install.setAccessible(true);
+        install.invoke(null, registry);
         String sessionId = ToolDispatcher.createSession();
         try {
             var session = ToolDispatcher.sessionFor(sessionId);
@@ -92,7 +94,11 @@ public final class IntegrationCheck {
             if (ToolDispatcher.visibleTools(session).stream().noneMatch(e -> nameOf(e).equals("launch")))
                 throw new AssertionError("load_toolset(run) does not reveal launch");
         } finally {
-            ToolRegistry.installForTest(previous);
+            try {
+                install.invoke(null, previous);
+            } catch (Exception e) {
+                throw new AssertionError("could not restore the tool registry", e);
+            }
             ToolDispatcher.deleteSession(sessionId);
         }
     }

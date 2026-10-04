@@ -46,7 +46,7 @@ public final class ToolRegistry {
      * Test seam: the self-check runs outside OSGi, where {@link Platform#getExtensionRegistry()}
      * is unavailable, so it needs to inject a map and assert the memoisation around it.
      */
-    public static void installForTest(Map<String, Tool> tools) {
+    static void installForTest(Map<String, Tool> tools) {
         cache = tools == null ? null : Collections.unmodifiableMap(new LinkedHashMap<>(tools));
     }
 
