@@ -3,6 +3,7 @@ package com.github.lunar.io;
 import com.github.lunar.tools.CallBudget;
 import com.github.lunar.tools.CoreTools;
 import com.github.lunar.tools.Tool;
+import com.github.lunar.tools.ToolDispatcher;
 import com.github.lunar.tools.ToolRegistry;
 import com.github.lunar.tools.ToolResult;
 import com.github.lunar.tools.ToolSpec;
@@ -88,6 +89,7 @@ public final class ProtocolCheck {
                 checkRefusalCarriesAStableCode(client, uri, session);
                 checkWindowBillsEmittedBytes(client, uri, session);
                 checkToolListIsBilled(client, uri, session);
+                checkWarmSessionIsEvictedAtCapacity();
                 return null;
             });
             checkCanonicalCancellation(client, uri, session);
@@ -224,6 +226,51 @@ public final class ProtocolCheck {
                 : "10 tools/list calls emitted at least " + (10L * catalogue)
                 + " bytes but spent only " + spent
                 + " of the output window, so the catalogue is free";
+    }
+
+    /**
+     * A session kept warm by a heartbeat must not lock everyone else out.
+     *
+     * <p>{@code createSession} reclaimed only sessions idle for 30 minutes. A client that opened 64
+     * sessions once and then pinged each of them every few minutes kept all 64 permanently non-idle,
+     * so every later {@code initialize} was refused with {@code session_capacity_reached} and the
+     * only way out was for that client to DELETE something -- a heartbeat can hold the table full
+     * forever. The table is a bounded cache, so at capacity the least-recently-seen session past a
+     * refractory period is reclaimed instead.
+     *
+     * <p>The age is stamped directly rather than waited out: this check cannot spend 25 minutes to
+     * prove a timeout, and the eviction decision reads {@code lastSeen} and nothing else. Twenty-five
+     * minutes is deliberately inside the 30-minute idle TTL, so the session under test is warm but
+     * not idle -- exactly the shape the idle path could not reclaim.
+     */
+    private static void checkWarmSessionIsEvictedAtCapacity() throws Exception {
+        java.lang.reflect.Field sessionsField = ToolDispatcher.class.getDeclaredField("SESSIONS");
+        sessionsField.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        Map<String, ToolDispatcher.Session> table =
+                (Map<String, ToolDispatcher.Session>) sessionsField.get(null);
+        java.lang.reflect.Field lastSeen =
+                ToolDispatcher.Session.class.getDeclaredField("lastSeen");
+        lastSeen.setAccessible(true);
+        List<String> created = new ArrayList<>();
+        String opened = null;
+        try {
+            while (table.size() < 64) created.add(ToolDispatcher.createSession());
+            long now = System.nanoTime();
+            // Oldest first, so there is exactly one right answer for which session is reclaimed.
+            for (int i = 0; i < created.size(); i++)
+                lastSeen.set(table.get(created.get(i)), now - TimeUnit.MINUTES.toNanos(25) + i);
+            opened = ToolDispatcher.createSession();
+            assert opened != null && !created.contains(opened);
+            assert !table.containsKey(created.get(0))
+                    : "the least-recently-seen session survived a full table, so initialize refused"
+                    + " instead of reclaiming it";
+            assert table.size() == 64
+                    : "the session table grew past its ceiling: " + table.size();
+        } finally {
+            created.forEach(table::remove);
+            if (opened != null) table.remove(opened);
+        }
     }
 
     private static HttpResponse<String> sessionInfo(HttpClient client, URI uri, String session, int id)

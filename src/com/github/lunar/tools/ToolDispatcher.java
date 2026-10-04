@@ -34,6 +34,17 @@ public final class ToolDispatcher {
      */
     private static final long SESSION_IDLE_NANOS = java.util.concurrent.TimeUnit.MINUTES.toNanos(30);
 
+    /** Sessions held at once, implicit one included. */
+    private static final int MAX_SESSIONS = 64;
+
+    /** A session seen this recently is not up for reclamation at the capacity wall.
+     *
+     *  <p>Long enough that a burst of initializes still meets the ceiling and is told to DELETE
+     *  something, short enough that a heartbeat cannot hold the table full. A client pinging every
+     *  few minutes is well outside it, and a client that opened 64 sessions seconds ago is not. */
+    private static final long SESSION_REFRACTORY_NANOS =
+            java.util.concurrent.TimeUnit.SECONDS.toNanos(60);
+
     /** The id used when a client sends no Mcp-Session-Id header; never evicted, always exactly one. */
     private static final String IMPLICIT = "implicit";
 
@@ -63,14 +74,26 @@ public final class ToolDispatcher {
             Session s = entry.getValue();
             if (s.id.equals(IMPLICIT)) continue;
             if (now - s.lastSeen < SESSION_IDLE_NANOS) continue;
-            // Compare-and-remove against the same instance: a session that was just refreshed by
-            // a request in flight must not be deleted out from under it.
-            if (!SESSIONS.remove(entry.getKey(), s)) continue;
-            s.closed = true;
-            ACTIVE.forEach((key, budget) -> { if (key.startsWith(s.id + "\n")) budget.cancel(); });
-            evicted++;
+            if (closeSession(s)) evicted++;
         }
         return evicted;
+    }
+
+    /**
+     * Take {@code s} out of the table and mark it closed.
+     *
+     * <p>The compare-and-remove is against the same instance on purpose: a session refreshed by a
+     * request in flight must not be deleted out from under it, or that request keeps using a
+     * session the server has already forgotten. Cancelling its budgets is what stops a tool still
+     * running under a session we just reclaimed.
+     *
+     * @return whether this call was the one that removed it
+     */
+    private static boolean closeSession(Session s) {
+        if (!SESSIONS.remove(s.id, s)) return false;
+        s.closed = true;
+        ACTIVE.forEach((key, budget) -> { if (key.startsWith(s.id + "\n")) budget.cancel(); });
+        return true;
     }
 
     /**
@@ -156,13 +179,23 @@ public final class ToolDispatcher {
             // Reclaim before refusing: the cap is a backstop for a burst, not a way to make leaked
             // sessions permanent, and evicting here is what stops an idle-but-full server from
             // rejecting every initialize from then on.
-            SESSIONS.values().removeIf(s -> {
-                boolean idle = !s.id.equals(IMPLICIT)
-                        && System.nanoTime() - s.lastSeen >= SESSION_IDLE_NANOS;
-                if (idle) s.closed = true;
-                return idle;
-            });
-            if (SESSIONS.size() >= 64) {
+            evictIdleSessions();
+            if (SESSIONS.size() >= MAX_SESSIONS) {
+                // The idle TTL was not the whole answer. A client that opened 64 sessions once and
+                // then pinged each every few minutes kept all 64 permanently non-idle, so every
+                // later initialize was refused and the only way out was for that client to DELETE
+                // something: a heartbeat could hold the table full forever. This table is a bounded
+                // cache, so at the wall the least-recently-seen session past the refractory period
+                // goes. closeSession carries the in-flight guard the idle path relies on.
+                Session lru = null;
+                for (Session s : SESSIONS.values()) {
+                    if (s.id.equals(IMPLICIT)) continue;
+                    if (System.nanoTime() - s.lastSeen < SESSION_REFRACTORY_NANOS) continue;
+                    if (lru == null || s.lastSeen < lru.lastSeen) lru = s;
+                }
+                if (lru != null) closeSession(lru);
+            }
+            if (SESSIONS.size() >= MAX_SESSIONS) {
                 throw new RequestError("session_capacity_reached","session capacity reached; DELETE an unused session");
             }
             String id = java.util.UUID.randomUUID().toString();
