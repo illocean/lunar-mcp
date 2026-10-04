@@ -13,6 +13,8 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -106,15 +108,6 @@ public final class ProtocolCheck {
     }
 
     /**
-     * The window must bill the bytes a call emitted, not the {@code maxBytes} it reserved.
-     *
-     * <p>Twenty {@code get_session_info} calls answer in a few hundred bytes each. Charging the
-     * 16 KiB reservation instead spent 320 KiB of an 8 MiB window on about six kilobytes of real
-     * output, which capped every session at 512 calls an hour however small the responses were.
-     * Asserted over the wire because the charge happens in the dispatcher's {@code finally}
-     * block, so a unit check of the helper would never have reached the bug.
-     */
-    /**
      * Run {@code body} with the real core tools registered.
      *
      * <p>The registry is empty outside OSgi, so the cancellation check installs a stub instead.
@@ -148,20 +141,53 @@ public final class ProtocolCheck {
     private static void checkRefusalCarriesAStableCode(HttpClient client, URI uri, String session)
             throws Exception {
         Map<?, ?> error = null;
-        for (int i = 0; i < 200 && error == null; i++) {
-            Map<?, ?> reply = (Map<?, ?>) Json.parse(send(client, uri,
-                    "{\"jsonrpc\":\"2.0\",\"id\":" + (40 + i) + ",\"method\":\"initialize\",\"params\":{"
-                            + "\"protocolVersion\":\"unsupported-client-version\",\"capabilities\":{},"
-                            + "\"clientInfo\":{\"name\":\"ProtocolCheck\",\"version\":\"1\"}}}").body());
-            error = (Map<?, ?>) reply.get("error");
+        // Every initialize the server accepted is a real session in the dispatcher's table, and
+        // eviction is 30 minutes away. They are deleted here, because leaving the table pinned at
+        // its ceiling makes the next initialize check fail with a capacity refusal that has
+        // nothing to do with what it is checking.
+        List<String> created = new ArrayList<>();
+        try {
+            for (int i = 0; i < 200 && error == null; i++) {
+                HttpResponse<String> reply = send(client, uri, initialize(40 + i));
+                reply.headers().firstValue("Mcp-Session-Id").ifPresent(created::add);
+                Map<?, ?> replyBody = (Map<?, ?>) Json.parse(reply.body());
+                error = (Map<?, ?>) replyBody.get("error");
+            }
+            assert error != null : "200 initialize calls never reached the session ceiling";
+            assert error.containsKey("data") : "refusal carries no error.data: " + error;
+            assert "session_capacity_reached".equals(((Map<?, ?>) error.get("data")).get("code"));
+            assert !error.get("message").toString().contains("session_capacity_reached")
+                    : "the code is still packed into the message as well as into the data";
+        } finally {
+            for (String id : created) {
+                client.send(HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(10))
+                        .header("Authorization", "Bearer check-token")
+                        .header("Mcp-Session-Id", id).DELETE().build(),
+                        HttpResponse.BodyHandlers.ofString());
+            }
         }
-        assert error != null : "200 initialize calls never reached the session ceiling";
-        assert error.containsKey("data") : "refusal carries no error.data: " + error;
-        assert "session_capacity_reached".equals(((Map<?, ?>) error.get("data")).get("code"));
-        assert !error.get("message").toString().contains("session_capacity_reached")
-                : "the code is still packed into the message as well as into the data";
+        // The table has to be usable again, or the next initialize check in this file fails with
+        // a capacity refusal that says nothing about what it is checking.
+        Map<?, ?> after = (Map<?, ?>) Json.parse(send(client, uri, initialize(9)).body());
+        assert after.get("error") == null
+                : "the capacity check left the session table full: " + after.get("error");
     }
 
+    private static String initialize(int id) {
+        return "{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"method\":\"initialize\",\"params\":{"
+                + "\"protocolVersion\":\"unsupported-client-version\",\"capabilities\":{},"
+                + "\"clientInfo\":{\"name\":\"ProtocolCheck\",\"version\":\"1\"}}}";
+    }
+
+    /**
+     * The window must bill the bytes a call emitted, not the {@code maxBytes} it reserved.
+     *
+     * <p>Twenty {@code get_session_info} calls answer in a few hundred bytes each. Charging the
+     * 16 KiB reservation instead spent 320 KiB of an 8 MiB window on about six kilobytes of real
+     * output, which capped every session at 512 calls an hour however small the responses were.
+     * Asserted over the wire because the charge happens in the dispatcher's {@code finally}
+     * block, so a unit check of the helper would never have reached the bug.
+     */
     private static void checkWindowBillsEmittedBytes(HttpClient client, URI uri, String session)
             throws Exception {
         long before = remainingOutputBytes(sessionInfo(client, uri, session, 20));
