@@ -556,8 +556,19 @@ public final class WorkspaceTools implements ToolProvider {
      * every other path in this class, and it makes a link a leaf: the link is deleted, its target
      * is never entered. Ponytail ceiling: the resolved-root comparison, which is exact for
      * symlinks and junctions alike -- a mount point is out of scope and would need the volume API.
+     *
+     * <p>The root is the one link that mechanism cannot see, because the root is never walked.
+     * It used to be resolved and adopted as its own boundary, which made every child satisfy
+     * {@link #within} and deleted the target's entire tree. It is now refused outright.
      */
     private static void deleteRecursively(java.nio.file.Path dir, CallBudget budget) throws Exception {
+        // Asked of the filesystem rather than inferred by comparing paths: toRealPath canonicalises
+        // the user profile to its 8.3 short form, so real.equals(normalized) is false for an
+        // ordinary directory and the first version of this guard refused every legitimate delete.
+        var attrs = Files.readAttributes(dir, java.nio.file.attribute.BasicFileAttributes.class,
+                LinkOption.NOFOLLOW_LINKS);
+        if (attrs.isOther() || attrs.isSymbolicLink())
+            throw new RequestError("location_not_allowed", "refusing to delete through a link: " + dir);
         deleteRecursively(dir, dir.toRealPath(), budget);
     }
 
@@ -1185,6 +1196,22 @@ public final class WorkspaceTools implements ToolProvider {
             if (!Files.exists(precious)) throw new AssertionError("delete followed a link out of the project"); checked++;
             if (Files.exists(project, LinkOption.NOFOLLOW_LINKS)) throw new AssertionError("project tree was not deleted"); checked++;
             if (Files.exists(link, LinkOption.NOFOLLOW_LINKS)) throw new AssertionError("the link itself must be deleted"); checked++;
+            // The one link the walk above cannot see is the root itself. Resolving it and adopting
+            // the result as the boundary makes every child satisfy `within`, so the target's entire
+            // tree is deleted. Make a second junction BE the project location and refuse instead.
+            java.nio.file.Path alias = root.resolve("alias");
+            if (!mklink(victim, alias))
+                throw new AssertionError("could not create a second junction at " + alias
+                        + "; deleteRecursively adopting a linked root as its own boundary is unproven here");
+            boolean refused = false;
+            try {
+                deleteRecursively(alias, new CallBudget(5_000));
+            } catch (RequestError refusedLocation) {
+                refused = true;
+            }
+            if (!refused) throw new AssertionError("deleteRecursively followed a link that was the root"); checked++;
+            if (!Files.exists(precious)) throw new AssertionError("deleting a linked root erased its target"); checked++;
+            if (!Files.exists(alias, LinkOption.NOFOLLOW_LINKS)) throw new AssertionError("a refused root must be left in place"); checked++;
         } finally {
             deleteTree(root);
         }
@@ -1211,10 +1238,16 @@ public final class WorkspaceTools implements ToolProvider {
         }
     }
 
-    /** Best-effort cleanup for the checks above: plain NIO, so it also removes a leftover link. */
+    /** Best-effort cleanup for the checks above: removes a leftover link without entering it. */
     private static void deleteTree(java.nio.file.Path dir) throws Exception {
         if (!Files.exists(dir, LinkOption.NOFOLLOW_LINKS)) return;
-        if (Files.isDirectory(dir, LinkOption.NOFOLLOW_LINKS)) {
+        // isDirectory(NOFOLLOW_LINKS) is true for a junction, so the old test recursed straight
+        // through one and deleted the very target a check had just proved was safe -- and the
+        // comment claimed the opposite. A junction reports isOther(), a symlink isSymbolicLink();
+        // both are leaves here, exactly as in deleteRecursively.
+        var attrs = Files.readAttributes(dir, java.nio.file.attribute.BasicFileAttributes.class,
+                LinkOption.NOFOLLOW_LINKS);
+        if (attrs.isDirectory() && !attrs.isOther() && !attrs.isSymbolicLink()) {
             try (var stream = Files.newDirectoryStream(dir)) {
                 for (java.nio.file.Path child : stream) deleteTree(child);
             }
