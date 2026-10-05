@@ -22,7 +22,14 @@ public final class FrameworkCheck {
     public static void main(String[] args) throws Exception {
         Map<String, Object> required = Tools.object(Map.of("path", Tools.string()), "path");
         SchemaValidator.validateDefinition(required);
-        check("required schema registers", true);
+        // There is no registry to inspect and nothing to register: validateDefinition returns or
+        // throws, so the check() that used to sit here was an unconditional counter. What was
+        // actually missing is the definition path's rejects -- the checks above cover validate,
+        // not validateDefinition. A required list naming an undeclared property is the case worth
+        // asserting: no argument set can ever satisfy such a schema, so a tool shipping one is
+        // broken for every call and only a load would reveal it.
+        rejects(() -> SchemaValidator.validateDefinition(
+                Tools.object(Map.of("path", Tools.string()), "missing")));
         rejects(() -> SchemaValidator.validate(required, Map.of()));
         rejects(() -> SchemaValidator.validate(required, Map.of("path", "x", "extra", true)));
         Map<String, Object> defaulted = Tools.object(Map.of("n", Map.of("type", "integer",
