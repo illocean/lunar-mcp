@@ -32,6 +32,12 @@ files in the workspace and launch processes. Treat as security issues anything t
   request on port 8124;
 - weakens the `expectedHash` guard that makes `write_file`, `move_file`, `delete_file`,
   `apply_edit` and `apply_quick_fix` require the current contents first;
+- weakens the root gate that keeps project creation *and* deletion inside
+  `lunar.projectRoots` (falling back to the workspace root), so either can be pointed at a
+  directory outside them — including the agent's own home directory;
+- weakens the delete walk that resolves every child against the tree root, so a symlink or
+  a Windows junction inside a tree can be followed out of the tree being deleted, including
+  when the tree root is itself a link; or
 - weakens the 32-character minimum on the token, or lets a short token be accepted; or
 - lets a request reach the listener on anything other than `127.0.0.1`.
 
