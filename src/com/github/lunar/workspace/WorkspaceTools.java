@@ -539,10 +539,20 @@ public final class WorkspaceTools implements ToolProvider {
         java.nio.file.Path location = p.getLocation() == null ? null : p.getLocation().toFile().toPath();
         // Removing the project first is what Eclipse itself does, and deleteRecursively is now
         // safe on its own: it resolves every child against the project root, so it no longer
-        // needs contained(), which would be unusable here because the IProject is already gone.
+        // needs contained() for the children. The root itself is still gated, by allowedRoot --
+        // the same gate createProject applies at :350. contained() cannot do this job because by
+        // this point the IProject is already gone, whereas allowedRoot resolves against the live
+        // filesystem and does not need the project to still exist.
         if (p.isOpen()) p.delete(false, true, budget.monitor()); else p.delete(false, false, budget.monitor());
-        if (deleteContent && location != null && Files.exists(location))
+        if (deleteContent && location != null && Files.exists(location)) {
+            // Destruction must not be more permissive than creation. createProject refuses a
+            // location under the agent's own home or the workspace root, so without this a
+            // project imported from such a directory -- or one whose location was moved after
+            // the fact -- could be deleted along with its whole tree. Read- and write-side
+            // checks agree on the rule because they resolve the same roots.
+            allowedRoot(location);
             deleteRecursively(location, budget);
+        }
         return Map.of("project", name, "deleted", true, "contentDeleted", deleteContent);
     }
 
