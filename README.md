@@ -22,7 +22,7 @@ flowchart LR
 
     agent -- "POST /mcp<br/>JSON-RPC over HTTP" --> http
     jdt & build & run & dbg --> state[("Eclipse workspace<br/>projects · files · settings")]
-    http -. "endpoint.json<br/>no token" .-> disk[[" .metadata/plugins/<br/>com.github.lunar/server/"]]
+    http -. "endpoint.json<br/>no token" .-> disk[[" .metadata/.plugins/<br/>com.github.lunar/server/"]]
 ```
 
 ## Why not just a shell
@@ -62,13 +62,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\lunar.ps1 connect
 
 `-Install` refuses to run while an Eclipse from that installation is alive. It backs up whatever is in `dropins` to `backup\installed-<timestamp>` first.
 
-Then start Eclipse with `-clean -consoleLog` and confirm:
+Then start Eclipse with `-data <workspace> -clean -consoleLog` and confirm:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\lunar.ps1 status
 ```
 
-`status` reports the resolved token/host/port, whether the variable and the config file agree, where lunar is installed, and whether the port is answering. Three things should agree: the descriptor at `<workspace>\.metadata\plugins\com.github.lunar\server\endpoint.json` exists, port 8124 listens, and an authenticated request answers. A descriptor left behind by an abnormal exit does *not* prove the server is live, so check the other two. Startup errors go to `<workspace>\.metadata\.log`.
+`status` reports the resolved host/port, the token's length and where it came from (never its value), whether the variable and the config file agree, where lunar is installed, and whether the port is answering. Three things should agree: the descriptor at `<workspace>\.metadata\.plugins\com.github.lunar\server\endpoint.json` exists, port 8124 listens, and an authenticated request answers. A descriptor left behind by an abnormal exit does *not* prove the server is live, so check the other two. Startup errors go to `<workspace>\.metadata\.log`.
+
+The `-data` argument is not decoration. This install sets `osgi.dataAreaRequiresExplicitInit=true`, so a launch without an instance area leaves the workspace uninitialized, the endpoint never binds, and the only symptom is the port refusing connections.
 
 `lunar.ps1` has five subcommands — `setup`, `connect`, `status`, `uninstall`, `help`. `help` prints the rest.
 
@@ -350,7 +352,7 @@ Worth evaluating against their own documentation, not against this page:
 - `delete_project` and `delete_launch_config` refuse unless `confirm` is the exact name.
 - Debug frame handles expire with debug state. Re-read frames after every resume, step or termination, and take every id from the tool that issued it.
 - Retained stdout and stderr are **concatenated, not interleaved**. Log offsets are UTF-8 bytes; other offsets are UTF-16 characters.
-- Bounds: 1 MiB request body, three tool calls running at once with a fourth queued for up to 10 s (only a caller that cannot get a slot in that time gets `429` with `Retry-After: 1`), and at most eight retained results sharing 2 MiB per session. Implementation bounds, not a load-test claim.
+- Bounds: 1 MiB request body, three tool calls running at once with a fourth queued for up to 10 s (only a caller that cannot get a slot in that time gets `429` with `Retry-After: 1`), and at most eight retained results sharing 2 MiB per session. Output is metered as an 8 MiB sliding window per session over the trailing 60 minutes, not a lifetime total, and `get_session_info` reports what is left of it as `remainingOutputBytes`; the oldest minute-bucket leaves the window as the clock moves, so a session that idles recovers. At most 64 sessions are held at once, and one that has been idle 30 minutes is reclaimed. Implementation bounds, not a load-test claim.
 - Every client sees the same catalog. Nothing is special-cased by client name or version.
 - `-InstallP2` publishes a p2 site but there is still no Tycho build; the default `-Install` just puts jars in `dropins`.
 
@@ -418,7 +420,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\check-env.ps1
 
 `check-env.ps1` needs no Eclipse. Run it if you touched a script: it dot-sources `lunar.ps1`, exercises four of the five subcommands — all but `help` — against a temporary user profile with the environment accessors replaced, and asserts that the minimum versions in `build.ps1` still match what the bundle manifests declare, so the two cannot drift. It reads `build-state.json` and asserts it names five jars, so run `build.ps1` first or it fails on a fresh clone. Nothing it does writes to the registry or your real `%USERPROFILE%\.lunar`.
 
-CI does exactly this on a clean clone: [`.github/workflows/build.yml`](.github/workflows/build.yml) unpacks the Eclipse 4.38 SDK drop, builds with `-NoInstall`, then runs `check-env.ps1`, and fails the job if either fails. Report vulnerabilities per [SECURITY.md](SECURITY.md).
+CI does exactly this on a clean clone: [`.github/workflows/build.yml`](.github/workflows/build.yml) unpacks the Eclipse 4.38 SDK drop, builds with `-NoInstall`, runs `check-env.ps1`, then builds again with `-Install` and boots that install headless through `smoke-endpoint.ps1 -EclipseHome`, which the workflow calls the one gate nothing else covers. It fails the job if any step fails. Report vulnerabilities per [SECURITY.md](SECURITY.md).
 
 ## License
 

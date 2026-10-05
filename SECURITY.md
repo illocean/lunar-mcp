@@ -43,3 +43,8 @@ files in the workspace and launch processes. Treat as security issues anything t
 
 Out of scope: a local process that already holds `ECLIPSE_MCP_TOKEN`. It is a bearer
 token, so possession of it is authorization by design.
+
+Known and unfixed: a program launched through `launch` or `run_tests` inherits Eclipse's
+own environment, so it can read `ECLIPSE_MCP_TOKEN` out of its own environment. The token
+is already readable from `HKCU\Environment` by any process of the same user, so this adds
+no privilege, but it is worth knowing before running untrusted code from a project.

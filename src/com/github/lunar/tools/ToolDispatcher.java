@@ -369,10 +369,15 @@ public final class ToolDispatcher {
                 mutationHeld=true;
             }
             r = ToolRunner.run(tool, validated, budget, tool.schedulingRule());
-            r = CoreTools.shape(session, r, maxBytes, name.equals("resume_result"));
+            r = CoreTools.shape(session, r, maxBytes);
             emitted=encodeResult(r,session.id()).getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
         } catch(org.eclipse.core.runtime.OperationCanceledException cancelled){
-            r=ToolResult.error("cancelled",cancelled.getMessage(),null);
+            // checkCancelled throws this one type for both "client cancelled" and "deadline
+            // expired", and it tests cancellation first, so this has to as well. Keying the code off
+            // isExpired() reported deadline_exceeded above the message "call cancelled" whenever a
+            // client cancelled a call whose budget had also run out, and those two contradicted each
+            // other. A call that only ran out of budget is still not a cancellation.
+            r=ToolResult.error(budget.isCancelRequested()?"cancelled":"deadline_exceeded",cancelled.getMessage(),null);
             emitted=encodeResult(r,session.id()).getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
         } catch(InterruptedException interrupted){
             Thread.currentThread().interrupt();budget.cancel();r=ToolResult.error("interrupted","Interrupted while waiting to mutate",null);

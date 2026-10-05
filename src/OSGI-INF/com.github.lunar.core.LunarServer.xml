@@ -8,6 +8,16 @@
 
   activate/deactivate/init/modified are ATTRIBUTES of <component>, not child elements. As a child
   element the element is ignored, so deactivate never runs and the port stays bound after a restart.
+
+  The workspace reference is the fix for a start-level ordering defect, and it is deliberately a
+  MANDATORY, DYNAMIC reference rather than a guard in the constructor. The constructor calls
+  ResourcesPlugin.getWorkspace() and starts the listener, and the throw escaped the constructor, so
+  SCR marked a singleton component permanently failed with no retry, and the port never opened.
+  Declaring the reference is the only thing that actually orders activation: an immediate component
+  with an unsatisfied mandatory reference is held back until the service is there. An optional
+  reference would not hold it back, and a static one would bind once and never track a workspace that
+  appears later. field-option=none because the component never injects the service; it only has to
+  wait for it.
 -->
 <component name="com.github.lunar.core.LunarServer"
            immediate="true"
@@ -17,4 +27,9 @@
     <provide interface="com.github.lunar.LunarServer"/>
   </service>
   <implementation class="com.github.lunar.LunarServer"/>
+  <reference name="workspace"
+             interface="org.eclipse.core.resources.IWorkspace"
+             cardinality="1..1"
+             policy="dynamic"
+             field-option="none"/>
 </component>

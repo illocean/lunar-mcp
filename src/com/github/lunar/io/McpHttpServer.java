@@ -1,5 +1,6 @@
 package com.github.lunar.io;
 
+import com.github.lunar.LunarServer;
 import com.github.lunar.tools.RequestError;
 import com.github.lunar.tools.ToolDispatcher;
 import com.sun.net.httpserver.HttpExchange;
@@ -19,7 +20,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.Semaphore;
 import java.util.Map;
 import java.net.URI;
-import org.eclipse.core.runtime.Platform;
 
 /** Hand-rolled JSON-RPC over the JDK's built-in HTTP server. No third-party transport. */
 public final class McpHttpServer {
@@ -251,6 +251,14 @@ public final class McpHttpServer {
                 return;
             }
             try {
+                // The 404 above ran before the queue park, so a session a peer deleted, or the LRU
+                // evicted, during up to TOOL_QUEUE_TIMEOUT_MS of waiting slips past it and comes back
+                // out of dispatch as 200 + session_unavailable. Same condition, two statuses, and
+                // ProtocolCheck pins the 404. The finally below still hands the slot back.
+                if (!ToolDispatcher.hasSession(session)) {
+                    send(ex, 404, error("null", INVALID_REQUEST, "unknown MCP session"));
+                    return;
+                }
                 Map<?, ?> parameters = message.get("params") instanceof Map<?, ?> map ? map : Map.of();
                 boolean loading = toolCall && "load_toolset".equals(parameters.get("name"));
                 int beforeTools = loading ? ToolDispatcher.visibleTools(
@@ -305,7 +313,11 @@ public final class McpHttpServer {
      * in-flight request into the platform log on every normal shutdown.
      */
     private static void internalError(HttpExchange ex, Throwable cause) {
-        if (cause != null) Platform.getLog(McpHttpServer.class).error("Lunar request dispatch failed", cause);
+        // Reuse LunarServer.log rather than calling Platform.getLog here: this class is deliberately
+        // constructible in a plain JVM (ProtocolCheck does it) and Platform.getLog throws outside
+        // OSGi, so a direct call replaces the 500 below with a connection reset and loses the cause.
+        if (cause != null) LunarServer.log(org.eclipse.core.runtime.IStatus.ERROR,
+                "Lunar request dispatch failed", cause);
         try {
             send(ex, 500, error("null", INTERNAL_ERROR, "internal error"));
         } catch (IOException ignored) {

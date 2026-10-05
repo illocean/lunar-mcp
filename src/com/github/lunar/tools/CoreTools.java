@@ -134,7 +134,7 @@ public final class CoreTools implements ToolProvider {
                         catch(Exception failure){r=ToolResult.error("child_failed",String.valueOf(failure.getMessage()),
                                 Map.of("name",c.get("name"),"exception",failure.getClass().getName()),null);}
                         r=shape(ToolDispatcher.sessionFor(b.sessionId()),r,
-                                Math.max(1024,b.maxOutputBytes()/calls.size()),false);
+                                Math.max(1024,b.maxOutputBytes()/calls.size()));
                         @SuppressWarnings("unchecked") Map<String,Object> outcome=new LinkedHashMap<>((Map<String,Object>)Json.parse(r.toJson()));
                         outcome.put("name",c.get("name"));results.add(outcome); if(!r.ok())break;
                     }
@@ -188,7 +188,7 @@ public final class CoreTools implements ToolProvider {
                 .thenComparing(m->(String)m.get("name")));
         return new ArrayList<>(ranked.subList(0,Math.min(limit,ranked.size())));
     }
-    static ToolResult shape(ToolDispatcher.Session s,ToolResult r,int maxBytes,boolean resume){
+    static ToolResult shape(ToolDispatcher.Session s,ToolResult r,int maxBytes){
         Map<String,Object> retained=new LinkedHashMap<>();retained.put("data",r.data());retained.put("error",r.error());
         String raw=Json.write(retained);int before=bytes(ToolDispatcher.encodeResult(r,s.id));
         Object data=r.data();Map<String,Object> error=r.error();String cursor=null;
@@ -262,14 +262,14 @@ public final class CoreTools implements ToolProvider {
         assert ((Number)d.get("offset")).intValue()==3;assert d.get("insert").equals("new");
         assert delta(Map.of("x",1),Map.of("x",1)).equals(Map.of());
         var s=new ToolDispatcher.Session("check");String large="x".repeat(5000);
-        ToolResult shaped=shape(s,ToolResult.ok(large,null),1024,false);
+        ToolResult shaped=shape(s,ToolResult.ok(large,null),1024);
         assert shaped.meta().truncated()&&s.cursors.containsKey(shaped.meta().resumeCursor());
         assert shaped.meta().bytesAfterShaping()<=1024;
         for(String tricky:List.of("\\\"".repeat(5000),"漢😀".repeat(2000))) {
-            ToolResult bounded=shape(s,ToolResult.ok(tricky,null),1024,false);
+            ToolResult bounded=shape(s,ToolResult.ok(tricky,null),1024);
             assert bytes(ToolDispatcher.encodeResult(bounded,s.id))<=1024;
         }
-        ToolResult failed=shape(s,ToolResult.error("batch_failed","Failed",Map.of("results",large),null),1024,false);
+        ToolResult failed=shape(s,ToolResult.error("batch_failed","Failed",Map.of("results",large),null),1024);
         assert failed.meta().truncated()&&bytes(ToolDispatcher.encodeResult(failed,s.id))<=1024;
         Map<String,Object> nullValue=new LinkedHashMap<>();nullValue.put("added",null);
         assert !delta(Map.of(),nullValue).equals(Map.of());
@@ -321,10 +321,10 @@ public final class CoreTools implements ToolProvider {
         // still be stubbed, or this would pass with the recognition removed entirely.
         var pageSession=new ToolDispatcher.Session("shape-self-paging");
         String oversized="x".repeat(64*1024);
-        var paged=shape(pageSession,ToolResult.ok(Map.of("nextOffset",oversized.length(),"hasMore",false,"text",oversized),null),1024,false);
+        var paged=shape(pageSession,ToolResult.ok(Map.of("nextOffset",oversized.length(),"hasMore",false,"text",oversized),null),1024);
         if(!(paged.data() instanceof Map<?,?> kept)||!kept.containsKey("nextOffset")||paged.meta().truncated())
             throw new AssertionError("shape() replaced a self-paging result with a cursor stub, stranding the documented read loop");
-        var plain=shape(pageSession,ToolResult.ok(Map.of("text",oversized),null),1024,false);
+        var plain=shape(pageSession,ToolResult.ok(Map.of("text",oversized),null),1024);
         if(!(plain.data() instanceof Map<?,?> stub)||!stub.containsKey("cursor"))
             throw new AssertionError("shape() did not stub an over-budget plain result, so the self-paging check above would pass for the wrong reason");
         // And the ceiling itself must not have been silently raised along the way.

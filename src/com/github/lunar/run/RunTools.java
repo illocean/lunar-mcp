@@ -377,11 +377,22 @@ public final class RunTools implements ToolProvider {
             while (buffer.hasRemaining()) { budget.checkCancelled(); if (channel.read(buffer) < 0) break; }
             byte[] bytes = buffer.array(); int count = buffer.position();
             if (count != 0 && (bytes[0] & 0xc0) == 0x80) throw new RequestError("invalid_range", "offset is not a UTF-8 boundary; use returned nextOffset");
-            int complete = utf8Prefix(bytes,count);
+            int complete = completePage(bytes,count);
             long next = offset + complete;
             return Map.of("text",new String(bytes,0,complete,StandardCharsets.UTF_8),"offset",offset,
                 "nextOffset",next,"fileBytes",size,"hasMore",next < size,"path",path.toString());
         }
+    }
+    /**
+     * A page of zero complete bytes is refused rather than returned. It can only happen at the very
+     * tail of a log whose last character was cut short mid-write, and answering it hands back a
+     * nextOffset equal to the offset the client already asked for: a client that pages by nextOffset
+     * would re-issue the identical request forever, and no error ever explains why.
+     */
+    private static int completePage(byte[] bytes,int count) {
+        int complete = utf8Prefix(bytes,count);
+        if (complete == 0 && count > 0) throw new RequestError("invalid_range", "log ends mid-character; read to the end of the file");
+        return complete;
     }
     private static int utf8Prefix(byte[] bytes,int length) {
         if (length == 0) return 0;
@@ -453,6 +464,13 @@ public final class RunTools implements ToolProvider {
             String prefix = new String(text,0,complete,StandardCharsets.UTF_8);
             if (prefix.indexOf('\ufffd') >= 0 || !"a漢🙂z".startsWith(prefix)) throw new AssertionError("UTF-8 page split");
         }
+        // A log whose last character was cut short mid-write must be refused, not answered with a page
+        // the client cannot advance past. The prefix loop above never sees this case: every prefix of
+        // a whole string yields at least one complete character.
+        byte[] truncated = {(byte)0xf0,(byte)0x9f,(byte)0x98};
+        try { completePage(truncated,truncated.length); throw new AssertionError("a log page that cannot advance was served"); }
+        catch (RequestError expected) { }
+        if (completePage("a漢🙂z".getBytes(StandardCharsets.UTF_8),9) != 9) throw new AssertionError("a whole page was not returned whole");
         Map<String,Object> page = characterPage("abc",1,1,"check");
         if (!page.get("text").equals("b") || !page.get("nextOffset").equals(2)) throw new AssertionError("Console page");
         Map<String,Object> emoji = characterPage("\ud83d\ude42z",0,1,"check");

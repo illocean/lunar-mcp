@@ -26,7 +26,9 @@
 /opencode.json
 /config/
 
-# Internal inventory whose tool counts predate the current server
+# Machine-local inventory derived from the provider source. Its counts are current --
+# TierDump against the live registry reproduces all 47 tools and every tier -- but the live
+# tools/list is the contract, so shipping a second copy only creates a file to drift.
 /TOOL-INVENTORY.md
 
 # IDE metadata

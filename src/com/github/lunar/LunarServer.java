@@ -173,7 +173,8 @@ public class LunarServer {
         }
     }
 
-    static void log(int severity, String message, Throwable t) {
+    /** Public because the io bundle's HTTP server logs through it from outside this package. */
+    public static void log(int severity, String message, Throwable t) {
         try {
             // com.github.lunar.io, not com.github.lunar.core: build.ps1 stages LunarServer
             // into the io bundle, so anything logged from here lands in the platform log

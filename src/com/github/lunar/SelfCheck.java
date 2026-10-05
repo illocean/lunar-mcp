@@ -41,6 +41,8 @@ public final class SelfCheck {
     /** Same shape and length as the real user-scope ECLIPSE_MCP_TOKEN. */
     private static final String TOKEN = "0123456789abcdef0123456789abcdef0123";
 
+    private static final String WORKSPACE_INTERFACE = "org.eclipse.core.resources.IWorkspace";
+
     private static int total;
     private static int failures;
 
@@ -407,6 +409,27 @@ public final class SelfCheck {
         // B3: as a child element this was ignored, so deactivate never ran on shutdown.
         yes("deactivate is a declared attribute", c.isDeactivateDeclared());
         eq("deactivate method name", "deactivate", c.getDeactivate());
+        // The constructor reaches ResourcesPlugin.getWorkspace(), so activation has to wait for the
+        // workspace service to exist. Without this reference SCR built the component during start-level
+        // bootstrap, the throw escaped the constructor, and a singleton component is never retried --
+        // so the port stayed closed for the rest of the session.
+        var workspace = c.getDependencies().stream().filter(r -> WORKSPACE_INTERFACE.equals(r.getInterface())).findFirst();
+        yes("component declares the workspace service reference", workspace.isPresent());
+        // Optional is the trap here: an optional reference does not hold activation back, which
+        // is the entire point of declaring it.
+        yes("the workspace reference is mandatory", workspace.map(r -> !r.isOptional()).orElse(false));
+        // static would bind once and never track a workspace that comes up later.
+        yes("the workspace reference is dynamic", workspace.map(r -> !r.isStatic()).orElse(false));
+        // The descriptor is only ever parsed here and by SCR at runtime. validate() is what SCR
+        // itself runs before activating, so this is the check that catches a reference naming a
+        // field or method the component does not have -- a gate that only asserted the attribute
+        // would pass a descriptor that cannot activate at all.
+        try {
+            c.validate();
+            yes("descriptor passes SCR's own validation", true);
+        } catch (RuntimeException invalid) {
+            fail("descriptor passes SCR's own validation", invalid.toString());
+        }
     }
 
     private static void checkManifest(Path jar) {
@@ -612,7 +635,17 @@ public final class SelfCheck {
                     go.await();
                     while (System.nanoTime() < deadline) {
                         if (Files.exists(target)) {
-                            String seen = Files.readString(target, StandardCharsets.UTF_8);
+                            String seen;
+                            try {
+                                seen = Files.readString(target, StandardCharsets.UTF_8);
+                            } catch (java.nio.file.AccessDeniedException renameInFlight) {
+                                // Windows refuses a read handle while EndpointFile is ATOMIC_MOVEing a
+                                // replacement over the target, so this race is the replace being atomic
+                                // -- the property this check exists to prove -- not a torn read. The
+                                // catch(Exception) below must not claim otherwise: it reported roughly
+                                // 1 run in 30 as a failure and it was never a B6 violation.
+                                continue;
+                            }
                             if (!seen.endsWith("}") || Json.request(seen) == null) {
                                 torn[0] = "reader saw a partial file of " + seen.length() + " bytes: "
                                         + seen;

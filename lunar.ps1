@@ -85,11 +85,21 @@ Fix or delete the file. To start over, delete it and run: .\lunar.ps1 setup
 function Write-LunarConfig {
     param([Parameter(Mandatory = $true)]$Config)
     $path = Get-LunarConfigPath
-    New-Item -ItemType Directory -Path (Split-Path -Parent $path) -Force | Out-Null
+    $dir = Split-Path -Parent $path
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
     $json = $Config | ConvertTo-Json
+    # Write to a sibling temp file and move it into place, the way EndpointFile does. A failure
+    # mid-write used to leave truncated JSON where the token lives, and Read-LunarConfig then
+    # throws on every later command until the file is replaced.
     # UTF-8 without a BOM. Set-Content -Encoding UTF8 writes one under Windows PowerShell
     # 5.1, and both the Java side and ConvertFrom-Json would then have to cope with it.
-    [System.IO.File]::WriteAllText($path, $json, (New-Object System.Text.UTF8Encoding($false)))
+    $temp = Join-Path $dir (".config.json.{0}.tmp" -f [Guid]::NewGuid().ToString('N'))
+    try {
+        [System.IO.File]::WriteAllText($temp, $json, (New-Object System.Text.UTF8Encoding($false)))
+        Move-Item -LiteralPath $temp -Destination $path -Force
+    } finally {
+        if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue }
+    }
     $path
 }
 
