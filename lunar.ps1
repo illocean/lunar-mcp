@@ -378,7 +378,9 @@ bearer_token_env_var = "ECLIPSE_MCP_TOKEN"
         return
     }
 
-    throw "Unknown client '$Client'. This script knows opencode and codex; for anything else, see the README."
+    # Nothing beyond the two supported clients is wired up, and the README documents the endpoint
+    # format rather than any client, so name the accepted values here instead of pointing elsewhere.
+    throw "Unknown client '$Client'. This script knows opencode and codex; for anything else add the endpoint by hand -- see the README."
 }
 
 # ---------------------------------------------------------------------------

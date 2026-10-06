@@ -175,6 +175,12 @@ New-Item -ItemType Directory -Path $homePlugins -Force | Out-Null
 New-Item -ItemType Directory -Path $siblingPool -Force | Out-Null
 New-Item -ItemType Directory -Path $namedPool -Force | Out-Null
 try {
+    # The two discovery assertions below prove that Resolve-LunarPoolDir followed config.ini
+    # and then the sibling convention. Both are silently vacuous on a machine where
+    # LUNAR_POOL_DIR is already set in the user environment, because the variable outranks
+    # discovery (asserted further down) and every call then returns it instead. Clear it here
+    # so a developer's own setting cannot turn two passing assertions into a false FAIL.
+    $env:LUNAR_POOL_DIR = $null
     $frameworkJar = 'org.eclipse.osgi_3.24.0.v20251126-0427.jar'
     New-Item -ItemType File -Path (Join-Path $namedPool $frameworkJar) -Force | Out-Null
     New-Item -ItemType File -Path (Join-Path $siblingPool $frameworkJar) -Force | Out-Null
